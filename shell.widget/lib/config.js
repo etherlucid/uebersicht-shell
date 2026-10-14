@@ -57,7 +57,7 @@ export const settings = {
   timeoutSeconds: 15,
 
   // Desktop corner snapping margins (pixels from screen edges / menu bar)
-  snapMarginX: 18,
+  snapMarginX: 15,
   snapMarginTop: 14,
   snapMarginBottom: 14,
 };
