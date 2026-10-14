@@ -54,7 +54,7 @@ const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap 
     }
 
     // Snap vertically if near top/bottom corner snap areas
-    if (Math.abs(newY - snapTop) <= SNAP_THRESHOLD) {
+    if (newY <= snapTop || Math.abs(newY - snapTop) <= SNAP_THRESHOLD) {
       newY = snapTop;
     } else if (Math.abs(newY - snapBottom) <= SNAP_THRESHOLD) {
       newY = snapBottom;
@@ -122,6 +122,10 @@ function get256Color(n) {
 }
 
 const getInitialPosition = () => {
+  const menuBarH = (typeof window !== 'undefined' && window.screen && window.screen.availTop)
+    ? window.screen.availTop
+    : 30;
+  const snapTop = menuBarH + 8;
   try {
     const saved = localStorage.getItem(POS_KEY);
     if (saved) {
@@ -131,15 +135,12 @@ const getInitialPosition = () => {
         const maxY = Math.max(SCREEN_MARGIN, (window.innerHeight || 1080) - 120);
         return {
           x: Math.max(SCREEN_MARGIN, Math.min(maxX, parsed.x)),
-          y: Math.max(SCREEN_MARGIN, Math.min(maxY, parsed.y)),
+          y: Math.max(snapTop, Math.min(maxY, parsed.y)),
         };
       }
     }
   } catch (e) {}
-  const menuBarH = (typeof window !== 'undefined' && window.screen && window.screen.availTop)
-    ? window.screen.availTop
-    : 30;
-  return { x: SNAP_MARGIN_X, y: menuBarH + 8 };
+  return { x: SNAP_MARGIN_X, y: snapTop };
 };
 
 const getInitialSize = () => {
@@ -410,9 +411,6 @@ function renderAnsiText(raw) {
             fontWeight: isBold ? '700' : '400',
             textDecoration: isUnderline ? 'underline' : 'none',
             opacity: isDim ? 0.6 : 1,
-            cursor: 'text',
-            userSelect: 'text',
-            WebkitUserSelect: 'text',
           }}
         >
           {textChunk}
@@ -477,9 +475,6 @@ function renderAnsiText(raw) {
           fontWeight: isBold ? '700' : '400',
           textDecoration: isUnderline ? 'underline' : 'none',
           opacity: isDim ? 0.6 : 1,
-          cursor: 'text',
-          userSelect: 'text',
-          WebkitUserSelect: 'text',
         }}
       >
         {remaining}
@@ -539,15 +534,28 @@ export const render = (state, dispatch) => {
     const startY = e.clientY;
     const isDragHandle = Boolean(e.target.closest('[data-drag-handle="true"]'));
 
+    const preventSelect = (selEvent) => {
+      selEvent.preventDefault();
+    };
+
     // Alt/Option key bypass OR explicit drag handle: drag immediately
     if (e.altKey || isDragHandle) {
       e.preventDefault();
       try {
-        window.getSelection()?.removeAllRanges();
+        if (window.getSelection) {
+          window.getSelection().removeAllRanges();
+        }
+      } catch (err) {}
+      window.addEventListener('selectstart', preventSelect, true);
+      try {
+        document.body.style.userSelect = 'none';
+        document.body.style.webkitUserSelect = 'none';
+        document.body.style.cursor = 'grabbing';
       } catch (err) {}
       dispatch({ type: 'START_DRAG', clientX: startX, clientY: startY });
 
       const onMouseMove = (moveEvent) => {
+        moveEvent.preventDefault();
         dispatch({
           type: 'MOVE_DRAG',
           clientX: moveEvent.clientX,
@@ -557,6 +565,15 @@ export const render = (state, dispatch) => {
       };
 
       const onMouseUp = () => {
+        window.removeEventListener('selectstart', preventSelect, true);
+        try {
+          document.body.style.userSelect = '';
+          document.body.style.webkitUserSelect = '';
+          document.body.style.cursor = '';
+          if (window.getSelection) {
+            window.getSelection().removeAllRanges();
+          }
+        } catch (err) {}
         dispatch({ type: 'END_DRAG' });
         window.removeEventListener('mousemove', onMouseMove);
         window.removeEventListener('mouseup', onMouseUp);
@@ -567,33 +584,46 @@ export const render = (state, dispatch) => {
       return;
     }
 
-    // Hold-to-drag state machine:
-    // User must hold mouse down for ~220ms without moving > 5px to engage widget drag.
-    // Immediate mouse movement before 220ms triggers native browser text selection.
+    // Default behavior is standard text selection.
+    // On a long-press (held for ~320ms without moving > 4px),
+    // widget engages drag mode, clears any selection, and suppresses text selection.
     let dragStarted = false;
     let holdTimer = setTimeout(() => {
       dragStarted = true;
       try {
-        window.getSelection()?.removeAllRanges();
+        if (window.getSelection) {
+          window.getSelection().removeAllRanges();
+        }
+      } catch (err) {}
+      window.addEventListener('selectstart', preventSelect, true);
+      try {
+        document.body.style.userSelect = 'none';
+        document.body.style.webkitUserSelect = 'none';
+        document.body.style.cursor = 'grabbing';
       } catch (err) {}
       dispatch({ type: 'START_DRAG', clientX: startX, clientY: startY });
-    }, 220);
+    }, 320);
 
     const onMouseMove = (moveEvent) => {
       const dist = Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY);
       if (!dragStarted) {
-        if (dist > 5) {
-          // Moved before hold threshold: user is dragging to select text!
+        if (dist > 4) {
+          // Moved before long-press threshold: user is dragging to select text!
           if (holdTimer) {
             clearTimeout(holdTimer);
             holdTimer = null;
           }
-          window.removeEventListener('mousemove', onMouseMove);
-          window.removeEventListener('mouseup', onMouseUp);
+          // Normal native text selection continues freely
         }
       } else {
-        // Dragging the widget
+        // Drag mode active: suppress text selection completely!
         moveEvent.preventDefault();
+        moveEvent.stopPropagation();
+        try {
+          if (window.getSelection && window.getSelection().rangeCount > 0) {
+            window.getSelection().removeAllRanges();
+          }
+        } catch (err) {}
         dispatch({
           type: 'MOVE_DRAG',
           clientX: moveEvent.clientX,
@@ -609,6 +639,17 @@ export const render = (state, dispatch) => {
         holdTimer = null;
       }
       if (dragStarted) {
+        window.removeEventListener('selectstart', preventSelect, true);
+        try {
+          document.body.style.userSelect = '';
+          document.body.style.webkitUserSelect = '';
+          document.body.style.cursor = '';
+        } catch (err) {}
+        try {
+          if (window.getSelection) {
+            window.getSelection().removeAllRanges();
+          }
+        } catch (err) {}
         dispatch({ type: 'END_DRAG' });
       }
       window.removeEventListener('mousemove', onMouseMove);
@@ -761,8 +802,6 @@ export const render = (state, dispatch) => {
     height: `${h}px`,
     zIndex: 998,
     cursor: isDragging ? 'grabbing' : isResizing ? 'se-resize' : 'text',
-    userSelect: isDragging ? 'none' : 'text',
-    WebkitUserSelect: isDragging ? 'none' : 'text',
     boxSizing: 'border-box',
   };
 
@@ -772,7 +811,12 @@ export const render = (state, dispatch) => {
 
   return (
     <div
-      style={positionStyle}
+      className={isDragging ? 'shell-dragging' : ''}
+      style={{
+        ...positionStyle,
+        userSelect: isDragging ? 'none' : 'text',
+        WebkitUserSelect: isDragging ? 'none' : 'text',
+      }}
       onMouseDown={handleMouseDown}
       tabIndex={0}
       onKeyDown={(e) => {
@@ -809,10 +853,21 @@ export const render = (state, dispatch) => {
 
         {/* Force clean translucent scrollbars on WebKit without browser white borders */}
         <style dangerouslySetInnerHTML={{ __html: `
-          .shell-terminal-scroll,
-          .shell-terminal-scroll *:not([data-no-drag="true"]) {
-            cursor: ${isDragging ? 'grabbing' : 'text'} !important;
+          /* When dragging: immediately freeze all text selection and set grabbing cursor */
+          .shell-dragging,
+          .shell-dragging * {
+            user-select: none !important;
+            -webkit-user-select: none !important;
+            cursor: grabbing !important;
           }
+
+          .shell-terminal-scroll,
+          .shell-terminal-scroll pre,
+          .shell-terminal-scroll span,
+          .shell-terminal-scroll div {
+            cursor: text;
+          }
+
           .shell-terminal-scroll,
           .shell-terminal-scroll * {
             color-scheme: dark !important;
@@ -972,6 +1027,12 @@ export const className = `
   color: ${ITERM2_THEME.fg};
   user-select: text;
   -webkit-user-select: text;
+  cursor: text;
+
+  /* Universal text caret across terminal content so hovering never shows arrow pointer */
+  &, & * {
+    cursor: text;
+  }
 
   ::selection {
     background: rgba(251, 184, 41, 0.35);
@@ -982,9 +1043,26 @@ export const className = `
     color: inherit;
   }
 
-  .shell-terminal-scroll,
-  .shell-terminal-scroll *:not([data-no-drag="true"]) {
-    cursor: text !important;
+  /* Specific interactive controls override text cursor */
+  input,
+  [data-no-drag="true"] {
+    cursor: auto;
+  }
+
+  [data-no-drag="true"][title="Clear terminal"],
+  [data-no-drag="true"][title*="cancel"] {
+    cursor: pointer !important;
+  }
+
+  [title="Drag to resize"] {
+    cursor: se-resize !important;
+  }
+
+  .shell-dragging,
+  .shell-dragging * {
+    user-select: none !important;
+    -webkit-user-select: none !important;
+    cursor: grabbing !important;
   }
 
   @keyframes shellPulse {
@@ -1120,7 +1198,7 @@ const terminalBodyStyle = {
 };
 
 const lineStyle = {
-  paddingBottom: '2px',
+  marginBottom: '2px',
   whiteSpace: 'pre',
   cursor: 'text',
   userSelect: 'text',
