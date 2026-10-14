@@ -410,6 +410,9 @@ function renderAnsiText(raw) {
             fontWeight: isBold ? '700' : '400',
             textDecoration: isUnderline ? 'underline' : 'none',
             opacity: isDim ? 0.6 : 1,
+            cursor: 'text',
+            userSelect: 'text',
+            WebkitUserSelect: 'text',
           }}
         >
           {textChunk}
@@ -474,6 +477,9 @@ function renderAnsiText(raw) {
           fontWeight: isBold ? '700' : '400',
           textDecoration: isUnderline ? 'underline' : 'none',
           opacity: isDim ? 0.6 : 1,
+          cursor: 'text',
+          userSelect: 'text',
+          WebkitUserSelect: 'text',
         }}
       >
         {remaining}
@@ -754,7 +760,7 @@ export const render = (state, dispatch) => {
     width: `${w}px`,
     height: `${h}px`,
     zIndex: 998,
-    cursor: isDragging ? 'grabbing' : isResizing ? 'se-resize' : 'default',
+    cursor: isDragging ? 'grabbing' : isResizing ? 'se-resize' : 'text',
     userSelect: isDragging ? 'none' : 'text',
     WebkitUserSelect: isDragging ? 'none' : 'text',
     boxSizing: 'border-box',
@@ -803,6 +809,10 @@ export const render = (state, dispatch) => {
 
         {/* Force clean translucent scrollbars on WebKit without browser white borders */}
         <style dangerouslySetInnerHTML={{ __html: `
+          .shell-terminal-scroll,
+          .shell-terminal-scroll *:not([data-no-drag="true"]) {
+            cursor: ${isDragging ? 'grabbing' : 'text'} !important;
+          }
           .shell-terminal-scroll,
           .shell-terminal-scroll * {
             color-scheme: dark !important;
@@ -972,6 +982,11 @@ export const className = `
     color: inherit;
   }
 
+  .shell-terminal-scroll,
+  .shell-terminal-scroll *:not([data-no-drag="true"]) {
+    cursor: text !important;
+  }
+
   @keyframes shellPulse {
     0%, 100% { opacity: 0.3; transform: scale(0.85); }
     50% { opacity: 1; transform: scale(1.15); }
@@ -1051,6 +1066,7 @@ const windowStyle = {
   overflow: 'hidden',
   display: 'flex',
   flexDirection: 'column',
+  cursor: 'text',
 };
 
 const titleBarStyle = {
@@ -1104,8 +1120,9 @@ const terminalBodyStyle = {
 };
 
 const lineStyle = {
-  marginBottom: '2px',
+  paddingBottom: '2px',
   whiteSpace: 'pre',
+  cursor: 'text',
   userSelect: 'text',
   WebkitUserSelect: 'text',
 };
@@ -1116,6 +1133,7 @@ const preStyle = {
   fontSize: 'inherit',
   whiteSpace: 'pre',
   wordBreak: 'normal',
+  cursor: 'text',
   userSelect: 'text',
   WebkitUserSelect: 'text',
 };
