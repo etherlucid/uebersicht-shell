@@ -55,6 +55,11 @@ export const settings = {
   promptSymbol: '❯',
   placeholder: 'run command...',
   timeoutSeconds: 15,
+
+  // Desktop corner snapping margins (pixels from screen edges / menu bar)
+  snapMarginX: 18,
+  snapMarginTop: 14,
+  snapMarginBottom: 14,
 };
 
 export default { theme, settings };

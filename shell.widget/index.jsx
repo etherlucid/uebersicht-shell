@@ -24,8 +24,9 @@ const POS_KEY = 'shell_widget_position';
 const SIZE_KEY = 'shell_widget_size';
 const SCREEN_MARGIN = 2;
 const SNAP_THRESHOLD = 20;
-const SNAP_MARGIN_X = 8;
-const SNAP_MARGIN_BOTTOM = 8;
+const SNAP_MARGIN_X = settings.snapMarginX !== undefined ? settings.snapMarginX : 18;
+const SNAP_MARGIN_TOP = settings.snapMarginTop !== undefined ? settings.snapMarginTop : 14;
+const SNAP_MARGIN_BOTTOM = settings.snapMarginBottom !== undefined ? settings.snapMarginBottom : 14;
 
 const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap = false) => {
   const winW = window.innerWidth || 1920;
@@ -38,10 +39,7 @@ const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap 
   let newY = Math.max(SCREEN_MARGIN, Math.min(maxY, rawY));
 
   if (!bypassSnap) {
-    const menuBarH = (typeof window !== 'undefined' && window.screen && window.screen.availTop)
-      ? window.screen.availTop
-      : 30;
-    const snapTop = menuBarH + 8;
+    const snapTop = SNAP_MARGIN_TOP;
     const snapBottom = Math.max(SCREEN_MARGIN, winH - cardHeight - SNAP_MARGIN_BOTTOM);
     const snapLeft = SNAP_MARGIN_X;
     const snapRight = Math.max(SCREEN_MARGIN, winW - cardWidth - SNAP_MARGIN_X);
@@ -54,7 +52,7 @@ const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap 
     }
 
     // Snap vertically if near top/bottom corner snap areas
-    if (newY <= snapTop || Math.abs(newY - snapTop) <= SNAP_THRESHOLD) {
+    if (Math.abs(newY - snapTop) <= SNAP_THRESHOLD) {
       newY = snapTop;
     } else if (Math.abs(newY - snapBottom) <= SNAP_THRESHOLD) {
       newY = snapBottom;
@@ -122,10 +120,7 @@ function get256Color(n) {
 }
 
 const getInitialPosition = () => {
-  const menuBarH = (typeof window !== 'undefined' && window.screen && window.screen.availTop)
-    ? window.screen.availTop
-    : 30;
-  const snapTop = menuBarH + 8;
+  const snapTop = SNAP_MARGIN_TOP;
   try {
     const saved = localStorage.getItem(POS_KEY);
     if (saved) {
@@ -135,7 +130,7 @@ const getInitialPosition = () => {
         const maxY = Math.max(SCREEN_MARGIN, (window.innerHeight || 1080) - 120);
         return {
           x: Math.max(SCREEN_MARGIN, Math.min(maxX, parsed.x)),
-          y: Math.max(snapTop, Math.min(maxY, parsed.y)),
+          y: Math.max(SCREEN_MARGIN, Math.min(maxY, parsed.y)),
         };
       }
     }
@@ -801,7 +796,7 @@ export const render = (state, dispatch) => {
     width: `${w}px`,
     height: `${h}px`,
     zIndex: 998,
-    cursor: isDragging ? 'grabbing' : isResizing ? 'se-resize' : 'text',
+    cursor: isDragging ? 'grabbing' : isResizing ? 'se-resize' : 'default',
     boxSizing: 'border-box',
   };
 
@@ -865,7 +860,7 @@ export const render = (state, dispatch) => {
           .shell-terminal-scroll pre,
           .shell-terminal-scroll span,
           .shell-terminal-scroll div {
-            cursor: text;
+            cursor: default;
           }
 
           .shell-terminal-scroll,
@@ -928,7 +923,7 @@ export const render = (state, dispatch) => {
               el.scrollTop = el.scrollHeight;
             }
           }}
-          style={{ ...terminalBodyStyle, cursor: isDragging ? 'grabbing' : 'text' }}
+          style={{ ...terminalBodyStyle, cursor: isDragging ? 'grabbing' : 'default' }}
           onClick={() => {
             if (showPrompt) {
               const sel = typeof window !== 'undefined' && window.getSelection ? window.getSelection().toString() : '';
@@ -1027,11 +1022,11 @@ export const className = `
   color: ${ITERM2_THEME.fg};
   user-select: text;
   -webkit-user-select: text;
-  cursor: text;
+  cursor: default;
 
-  /* Universal text caret across terminal content so hovering never shows arrow pointer */
+  /* Standard mouse pointer across terminal content, no caret cursor */
   &, & * {
-    cursor: text;
+    cursor: default;
   }
 
   ::selection {
@@ -1144,7 +1139,7 @@ const windowStyle = {
   overflow: 'hidden',
   display: 'flex',
   flexDirection: 'column',
-  cursor: 'text',
+  cursor: 'default',
 };
 
 const titleBarStyle = {
@@ -1191,7 +1186,7 @@ const terminalBodyStyle = {
   fontFamily: '"SF Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace',
   fontSize: settings.fontSize || '11px',
   lineHeight: settings.lineHeight || '1.35',
-  cursor: 'text',
+  cursor: 'default',
   userSelect: 'text',
   WebkitUserSelect: 'text',
   boxSizing: 'border-box',
@@ -1200,7 +1195,7 @@ const terminalBodyStyle = {
 const lineStyle = {
   marginBottom: '2px',
   whiteSpace: 'pre',
-  cursor: 'text',
+  cursor: 'default',
   userSelect: 'text',
   WebkitUserSelect: 'text',
 };
@@ -1211,7 +1206,7 @@ const preStyle = {
   fontSize: 'inherit',
   whiteSpace: 'pre',
   wordBreak: 'normal',
-  cursor: 'text',
+  cursor: 'default',
   userSelect: 'text',
   WebkitUserSelect: 'text',
 };
