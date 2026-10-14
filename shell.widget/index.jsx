@@ -504,6 +504,8 @@ export const render = (state, dispatch) => {
 
   const handleRefresh = (e) => {
     if (e) e.stopPropagation();
+    const sel = typeof window !== 'undefined' && window.getSelection ? window.getSelection().toString() : '';
+    if (sel && sel.length > 0) return;
     if (!configuredCommand) return;
     dispatch({ type: 'MANUAL_REFRESH' });
     const fullCmd = formatShellCommand(configuredCommand);
@@ -527,20 +529,82 @@ export const render = (state, dispatch) => {
     if (e.button !== 0) return;
     if (e.target.closest('input, textarea, button, a, [data-no-drag="true"]')) return;
 
-    e.preventDefault();
-    dispatch({ type: 'START_DRAG', clientX: e.clientX, clientY: e.clientY });
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const isDragHandle = Boolean(e.target.closest('[data-drag-handle="true"]'));
+
+    // Alt/Option key bypass OR explicit drag handle: drag immediately
+    if (e.altKey || isDragHandle) {
+      e.preventDefault();
+      try {
+        window.getSelection()?.removeAllRanges();
+      } catch (err) {}
+      dispatch({ type: 'START_DRAG', clientX: startX, clientY: startY });
+
+      const onMouseMove = (moveEvent) => {
+        dispatch({
+          type: 'MOVE_DRAG',
+          clientX: moveEvent.clientX,
+          clientY: moveEvent.clientY,
+          metaKey: moveEvent.metaKey,
+        });
+      };
+
+      const onMouseUp = () => {
+        dispatch({ type: 'END_DRAG' });
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+      };
+
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+      return;
+    }
+
+    // Hold-to-drag state machine:
+    // User must hold mouse down for ~220ms without moving > 5px to engage widget drag.
+    // Immediate mouse movement before 220ms triggers native browser text selection.
+    let dragStarted = false;
+    let holdTimer = setTimeout(() => {
+      dragStarted = true;
+      try {
+        window.getSelection()?.removeAllRanges();
+      } catch (err) {}
+      dispatch({ type: 'START_DRAG', clientX: startX, clientY: startY });
+    }, 220);
 
     const onMouseMove = (moveEvent) => {
-      dispatch({
-        type: 'MOVE_DRAG',
-        clientX: moveEvent.clientX,
-        clientY: moveEvent.clientY,
-        metaKey: moveEvent.metaKey,
-      });
+      const dist = Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY);
+      if (!dragStarted) {
+        if (dist > 5) {
+          // Moved before hold threshold: user is dragging to select text!
+          if (holdTimer) {
+            clearTimeout(holdTimer);
+            holdTimer = null;
+          }
+          window.removeEventListener('mousemove', onMouseMove);
+          window.removeEventListener('mouseup', onMouseUp);
+        }
+      } else {
+        // Dragging the widget
+        moveEvent.preventDefault();
+        dispatch({
+          type: 'MOVE_DRAG',
+          clientX: moveEvent.clientX,
+          clientY: moveEvent.clientY,
+          metaKey: moveEvent.metaKey,
+        });
+      }
     };
 
     const onMouseUp = () => {
-      dispatch({ type: 'END_DRAG' });
+      if (holdTimer) {
+        clearTimeout(holdTimer);
+        holdTimer = null;
+      }
+      if (dragStarted) {
+        dispatch({ type: 'END_DRAG' });
+      }
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
     };
@@ -690,9 +754,9 @@ export const render = (state, dispatch) => {
     width: `${w}px`,
     height: `${h}px`,
     zIndex: 998,
-    cursor: isDragging ? 'grabbing' : isResizing ? 'se-resize' : 'grab',
-    userSelect: 'none',
-    WebkitUserSelect: 'none',
+    cursor: isDragging ? 'grabbing' : isResizing ? 'se-resize' : 'default',
+    userSelect: isDragging ? 'none' : 'text',
+    WebkitUserSelect: isDragging ? 'none' : 'text',
     boxSizing: 'border-box',
   };
 
@@ -715,11 +779,10 @@ export const render = (state, dispatch) => {
       <div
         style={windowStyle}
         onDoubleClick={isSingleCommandMode ? handleRefresh : undefined}
-        title={isSingleCommandMode ? `${configuredCommand} (double-click to re-run)` : undefined}
       >
         {/* Optional Title Bar (matching cava.widget, hidden when showTitleBar is false) */}
         {settings.showTitleBar && (
-          <div style={titleBarStyle}>
+          <div style={titleBarStyle} data-drag-handle="true">
             <div style={trafficLightsStyle}>
               <span
                 style={{ ...dotStyle, backgroundColor: '#ff5f56' }}
@@ -800,9 +863,11 @@ export const render = (state, dispatch) => {
               el.scrollTop = el.scrollHeight;
             }
           }}
-          style={terminalBodyStyle}
+          style={{ ...terminalBodyStyle, cursor: isDragging ? 'grabbing' : 'text' }}
           onClick={() => {
             if (showPrompt) {
+              const sel = typeof window !== 'undefined' && window.getSelection ? window.getSelection().toString() : '';
+              if (sel && sel.length > 0) return;
               const inputEl = document.getElementById('shell-widget-input');
               if (inputEl) inputEl.focus();
             }
@@ -895,6 +960,17 @@ export const className = `
   color-scheme: dark;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
   color: ${ITERM2_THEME.fg};
+  user-select: text;
+  -webkit-user-select: text;
+
+  ::selection {
+    background: rgba(251, 184, 41, 0.35);
+    color: inherit;
+  }
+  *::selection {
+    background: rgba(251, 184, 41, 0.35);
+    color: inherit;
+  }
 
   @keyframes shellPulse {
     0%, 100% { opacity: 0.3; transform: scale(0.85); }
@@ -985,6 +1061,8 @@ const titleBarStyle = {
   borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
   backgroundColor: 'rgba(0, 0, 0, 0.15)',
   cursor: 'grab',
+  userSelect: 'none',
+  WebkitUserSelect: 'none',
   flexShrink: 0,
 };
 
@@ -1019,7 +1097,7 @@ const terminalBodyStyle = {
   fontFamily: '"SF Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace',
   fontSize: settings.fontSize || '11px',
   lineHeight: settings.lineHeight || '1.35',
-  cursor: configuredCommand ? 'grab' : 'text',
+  cursor: 'text',
   userSelect: 'text',
   WebkitUserSelect: 'text',
   boxSizing: 'border-box',
@@ -1028,6 +1106,8 @@ const terminalBodyStyle = {
 const lineStyle = {
   marginBottom: '2px',
   whiteSpace: 'pre',
+  userSelect: 'text',
+  WebkitUserSelect: 'text',
 };
 
 const preStyle = {
@@ -1036,6 +1116,8 @@ const preStyle = {
   fontSize: 'inherit',
   whiteSpace: 'pre',
   wordBreak: 'normal',
+  userSelect: 'text',
+  WebkitUserSelect: 'text',
 };
 
 const promptRowStyle = {
