@@ -22,39 +22,41 @@ export const command = configuredCommand ? formatShellCommand(configuredCommand)
 
 const POS_KEY = 'shell_widget_position';
 const SIZE_KEY = 'shell_widget_size';
-const SCREEN_MARGIN = 2;
-const SNAP_THRESHOLD = 20;
+const SCREEN_MARGIN = 0;
+const SNAP_THRESHOLD = settings.snapThreshold !== undefined ? settings.snapThreshold : 6;
+const SNAP_EDGE_TOLERANCE = 3;
 const SNAP_MARGIN_X = settings.snapMarginX !== undefined ? settings.snapMarginX : 15;
 const SNAP_MARGIN_TOP = settings.snapMarginTop !== undefined ? settings.snapMarginTop : 14;
 const SNAP_MARGIN_BOTTOM = settings.snapMarginBottom !== undefined ? settings.snapMarginBottom : 14;
+const ENABLE_SNAPPING = settings.enableSnapping !== undefined ? settings.enableSnapping : true;
 
 const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap = false) => {
   const winW = window.innerWidth || 1920;
   const winH = window.innerHeight || 1080;
 
-  const maxX = Math.max(SCREEN_MARGIN, winW - cardWidth - SCREEN_MARGIN);
-  const maxY = Math.max(SCREEN_MARGIN, winH - cardHeight - SCREEN_MARGIN);
+  const maxX = Math.max(0, winW - cardWidth);
+  const maxY = Math.max(0, winH - cardHeight);
 
-  let newX = Math.max(SCREEN_MARGIN, Math.min(maxX, rawX));
-  let newY = Math.max(SCREEN_MARGIN, Math.min(maxY, rawY));
+  let newX = Math.max(0, Math.min(maxX, rawX));
+  let newY = Math.max(0, Math.min(maxY, rawY));
 
-  if (!bypassSnap) {
+  if (ENABLE_SNAPPING && !bypassSnap) {
     const snapTop = SNAP_MARGIN_TOP;
-    const snapBottom = Math.max(SCREEN_MARGIN, winH - cardHeight - SNAP_MARGIN_BOTTOM);
+    const snapBottom = Math.max(0, winH - cardHeight - SNAP_MARGIN_BOTTOM);
     const snapLeft = SNAP_MARGIN_X;
-    const snapRight = Math.max(SCREEN_MARGIN, winW - cardWidth - SNAP_MARGIN_X);
+    const snapRight = Math.max(0, winW - cardWidth - SNAP_MARGIN_X);
 
-    // Snap horizontally if near left/right corner snap areas
-    if (Math.abs(newX - snapLeft) <= SNAP_THRESHOLD) {
+    // Horizontal snapping: release when moving closer to screen edge than guideline
+    if (newX >= snapLeft - SNAP_EDGE_TOLERANCE && newX <= snapLeft + SNAP_THRESHOLD) {
       newX = snapLeft;
-    } else if (Math.abs(newX - snapRight) <= SNAP_THRESHOLD) {
+    } else if (newX >= snapRight - SNAP_THRESHOLD && newX <= snapRight + SNAP_EDGE_TOLERANCE) {
       newX = snapRight;
     }
 
-    // Snap vertically if near top/bottom corner snap areas
-    if (Math.abs(newY - snapTop) <= SNAP_THRESHOLD) {
+    // Vertical snapping: release when moving closer to top/bottom edge than guideline
+    if (newY >= snapTop - SNAP_EDGE_TOLERANCE && newY <= snapTop + SNAP_THRESHOLD) {
       newY = snapTop;
-    } else if (Math.abs(newY - snapBottom) <= SNAP_THRESHOLD) {
+    } else if (newY >= snapBottom - SNAP_THRESHOLD && newY <= snapBottom + SNAP_EDGE_TOLERANCE) {
       newY = snapBottom;
     }
   }
@@ -293,12 +295,13 @@ export const updateState = (event, previousState) => {
     const deltaX = event.clientX - previousState.dragStartX;
     const deltaY = event.clientY - previousState.dragStartY;
 
+    const bypassSnap = event.bypassSnap || event.metaKey;
     const { x: newX, y: newY } = calculateSnappedPosition(
       previousState.startPosX + deltaX,
       previousState.startPosY + deltaY,
       previousState.w,
       previousState.h,
-      event.metaKey
+      bypassSnap
     );
 
     try {
@@ -336,19 +339,19 @@ export const updateState = (event, previousState) => {
 
     const winW = window.innerWidth || 1920;
     const winH = window.innerHeight || 1080;
-    const maxW = Math.max(220, winW - previousState.x - SCREEN_MARGIN);
-    const maxH = Math.max(120, winH - previousState.y - SCREEN_MARGIN);
+    const maxW = Math.max(220, winW - previousState.x);
+    const maxH = Math.max(120, winH - previousState.y);
 
     let newW = Math.max(220, Math.min(maxW, previousState.startW + deltaW));
     let newH = Math.max(120, Math.min(maxH, previousState.startH + deltaH));
 
-    if (!event.metaKey) {
+    if (ENABLE_SNAPPING && !event.bypassSnap && !event.metaKey) {
       const snapW = winW - previousState.x - SNAP_MARGIN_X;
       const snapH = winH - previousState.y - SNAP_MARGIN_BOTTOM;
-      if (Math.abs(newW - snapW) <= SNAP_THRESHOLD && snapW >= 220) {
+      if (newW >= snapW - SNAP_THRESHOLD && newW <= snapW + SNAP_EDGE_TOLERANCE && snapW >= 220) {
         newW = snapW;
       }
-      if (Math.abs(newH - snapH) <= SNAP_THRESHOLD && snapH >= 120) {
+      if (newH >= snapH - SNAP_THRESHOLD && newH <= snapH + SNAP_EDGE_TOLERANCE && snapH >= 120) {
         newH = snapH;
       }
     }
@@ -555,7 +558,7 @@ export const render = (state, dispatch) => {
           type: 'MOVE_DRAG',
           clientX: moveEvent.clientX,
           clientY: moveEvent.clientY,
-          metaKey: moveEvent.metaKey,
+          bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
         });
       };
 
@@ -623,7 +626,7 @@ export const render = (state, dispatch) => {
           type: 'MOVE_DRAG',
           clientX: moveEvent.clientX,
           clientY: moveEvent.clientY,
-          metaKey: moveEvent.metaKey,
+          bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
         });
       }
     };
@@ -667,7 +670,7 @@ export const render = (state, dispatch) => {
         type: 'MOVE_RESIZE',
         clientX: moveEvent.clientX,
         clientY: moveEvent.clientY,
-        metaKey: moveEvent.metaKey,
+        bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
       });
     };
 
