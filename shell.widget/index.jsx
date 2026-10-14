@@ -23,6 +23,46 @@ export const command = configuredCommand ? formatShellCommand(configuredCommand)
 const POS_KEY = 'shell_widget_position';
 const SIZE_KEY = 'shell_widget_size';
 const SCREEN_MARGIN = 2;
+const SNAP_THRESHOLD = 20;
+const SNAP_MARGIN_X = 8;
+const SNAP_MARGIN_BOTTOM = 8;
+
+const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap = false) => {
+  const winW = window.innerWidth || 1920;
+  const winH = window.innerHeight || 1080;
+
+  const maxX = Math.max(SCREEN_MARGIN, winW - cardWidth - SCREEN_MARGIN);
+  const maxY = Math.max(SCREEN_MARGIN, winH - cardHeight - SCREEN_MARGIN);
+
+  let newX = Math.max(SCREEN_MARGIN, Math.min(maxX, rawX));
+  let newY = Math.max(SCREEN_MARGIN, Math.min(maxY, rawY));
+
+  if (!bypassSnap) {
+    const menuBarH = (typeof window !== 'undefined' && window.screen && window.screen.availTop)
+      ? window.screen.availTop
+      : 30;
+    const snapTop = menuBarH + 8;
+    const snapBottom = Math.max(SCREEN_MARGIN, winH - cardHeight - SNAP_MARGIN_BOTTOM);
+    const snapLeft = SNAP_MARGIN_X;
+    const snapRight = Math.max(SCREEN_MARGIN, winW - cardWidth - SNAP_MARGIN_X);
+
+    // Snap horizontally if near left/right corner snap areas
+    if (Math.abs(newX - snapLeft) <= SNAP_THRESHOLD) {
+      newX = snapLeft;
+    } else if (Math.abs(newX - snapRight) <= SNAP_THRESHOLD) {
+      newX = snapRight;
+    }
+
+    // Snap vertically if near top/bottom corner snap areas
+    if (Math.abs(newY - snapTop) <= SNAP_THRESHOLD) {
+      newY = snapTop;
+    } else if (Math.abs(newY - snapBottom) <= SNAP_THRESHOLD) {
+      newY = snapBottom;
+    }
+  }
+
+  return { x: newX, y: newY };
+};
 
 const FG_MAP = {
   '30': ITERM2_THEME.black,
@@ -87,8 +127,8 @@ const getInitialPosition = () => {
     if (saved) {
       const parsed = JSON.parse(saved);
       if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
-        const maxX = Math.max(SCREEN_MARGIN, (window.innerWidth || 1920) - 400);
-        const maxY = Math.max(SCREEN_MARGIN, (window.innerHeight || 1080) - 240);
+        const maxX = Math.max(SCREEN_MARGIN, (window.innerWidth || 1920) - 220);
+        const maxY = Math.max(SCREEN_MARGIN, (window.innerHeight || 1080) - 120);
         return {
           x: Math.max(SCREEN_MARGIN, Math.min(maxX, parsed.x)),
           y: Math.max(SCREEN_MARGIN, Math.min(maxY, parsed.y)),
@@ -96,7 +136,10 @@ const getInitialPosition = () => {
       }
     }
   } catch (e) {}
-  return { x: 50, y: 220 };
+  const menuBarH = (typeof window !== 'undefined' && window.screen && window.screen.availTop)
+    ? window.screen.availTop
+    : 30;
+  return { x: SNAP_MARGIN_X, y: menuBarH + 8 };
 };
 
 const getInitialSize = () => {
@@ -253,11 +296,14 @@ export const updateState = (event, previousState) => {
   if (event.type === 'MOVE_DRAG' && previousState.isDragging) {
     const deltaX = event.clientX - previousState.dragStartX;
     const deltaY = event.clientY - previousState.dragStartY;
-    const maxX = Math.max(SCREEN_MARGIN, window.innerWidth - previousState.w - SCREEN_MARGIN);
-    const maxY = Math.max(SCREEN_MARGIN, window.innerHeight - previousState.h - SCREEN_MARGIN);
 
-    const newX = Math.max(SCREEN_MARGIN, Math.min(maxX, previousState.startPosX + deltaX));
-    const newY = Math.max(SCREEN_MARGIN, Math.min(maxY, previousState.startPosY + deltaY));
+    const { x: newX, y: newY } = calculateSnappedPosition(
+      previousState.startPosX + deltaX,
+      previousState.startPosY + deltaY,
+      previousState.w,
+      previousState.h,
+      event.metaKey
+    );
 
     try {
       localStorage.setItem(POS_KEY, JSON.stringify({ x: newX, y: newY }));
@@ -292,11 +338,24 @@ export const updateState = (event, previousState) => {
     const deltaW = event.clientX - previousState.resizeStartX;
     const deltaH = event.clientY - previousState.resizeStartY;
 
-    const maxW = Math.max(220, window.innerWidth - previousState.x - SCREEN_MARGIN);
-    const maxH = Math.max(120, window.innerHeight - previousState.y - SCREEN_MARGIN);
+    const winW = window.innerWidth || 1920;
+    const winH = window.innerHeight || 1080;
+    const maxW = Math.max(220, winW - previousState.x - SCREEN_MARGIN);
+    const maxH = Math.max(120, winH - previousState.y - SCREEN_MARGIN);
 
-    const newW = Math.max(220, Math.min(maxW, previousState.startW + deltaW));
-    const newH = Math.max(120, Math.min(maxH, previousState.startH + deltaH));
+    let newW = Math.max(220, Math.min(maxW, previousState.startW + deltaW));
+    let newH = Math.max(120, Math.min(maxH, previousState.startH + deltaH));
+
+    if (!event.metaKey) {
+      const snapW = winW - previousState.x - SNAP_MARGIN_X;
+      const snapH = winH - previousState.y - SNAP_MARGIN_BOTTOM;
+      if (Math.abs(newW - snapW) <= SNAP_THRESHOLD && snapW >= 220) {
+        newW = snapW;
+      }
+      if (Math.abs(newH - snapH) <= SNAP_THRESHOLD && snapH >= 120) {
+        newH = snapH;
+      }
+    }
 
     try {
       localStorage.setItem(SIZE_KEY, JSON.stringify({ w: newW, h: newH }));
@@ -472,7 +531,12 @@ export const render = (state, dispatch) => {
     dispatch({ type: 'START_DRAG', clientX: e.clientX, clientY: e.clientY });
 
     const onMouseMove = (moveEvent) => {
-      dispatch({ type: 'MOVE_DRAG', clientX: moveEvent.clientX, clientY: moveEvent.clientY });
+      dispatch({
+        type: 'MOVE_DRAG',
+        clientX: moveEvent.clientX,
+        clientY: moveEvent.clientY,
+        metaKey: moveEvent.metaKey,
+      });
     };
 
     const onMouseUp = () => {
@@ -493,7 +557,12 @@ export const render = (state, dispatch) => {
     dispatch({ type: 'START_RESIZE', clientX: e.clientX, clientY: e.clientY });
 
     const onMouseMove = (moveEvent) => {
-      dispatch({ type: 'MOVE_RESIZE', clientX: moveEvent.clientX, clientY: moveEvent.clientY });
+      dispatch({
+        type: 'MOVE_RESIZE',
+        clientX: moveEvent.clientX,
+        clientY: moveEvent.clientY,
+        metaKey: moveEvent.metaKey,
+      });
     };
 
     const onMouseUp = () => {
