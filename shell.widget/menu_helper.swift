@@ -41,8 +41,7 @@ menu.addItem(NSMenuItem.separator())
 
 // Run Again (replacing clear output)
 let rerunTitle = state.rerunTitle ?? "Run Again"
-let rerunItem = NSMenuItem(title: rerunTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "r")
-rerunItem.keyEquivalentModifierMask = [.command]
+let rerunItem = NSMenuItem(title: rerunTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
 rerunItem.target = delegate
 rerunItem.representedObject = "{\"action\":\"RUN_AGAIN\"}"
 if let canRerun = state.canRerun {
