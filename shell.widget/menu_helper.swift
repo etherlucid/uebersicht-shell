@@ -32,13 +32,6 @@ let delegate = MenuDelegate()
 let menu = NSMenu(title: "Shell Controls")
 menu.autoenablesItems = false
 
-// Header Item
-let header = NSMenuItem(title: "💻 Shell Terminal", action: nil, keyEquivalent: "")
-header.isEnabled = false
-menu.addItem(header)
-
-menu.addItem(NSMenuItem.separator())
-
 // Run Again (replacing clear output)
 let rerunTitle = state.rerunTitle ?? "Run Again"
 let rerunItem = NSMenuItem(title: rerunTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
