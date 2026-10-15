@@ -186,52 +186,107 @@ function get256Color(n) {
   return `rgb(${gray}, ${gray}, ${gray})`;
 }
 
-const getInitialPosition = () => {
-  const snapTop = SNAP_MARGIN_TOP;
+const getScreenId = () => {
+  try {
+    if (typeof window !== 'undefined' && window.location && window.location.pathname) {
+      const parts = window.location.pathname.split('/');
+      if (parts[1] !== undefined && parts[1] !== '') {
+        return `screen_${parts[1]}`;
+      }
+    }
+  } catch (e) {}
+  try {
+    if (typeof window !== 'undefined' && window.screen) {
+      return `screen_${window.screen.width}x${window.screen.height}`;
+    }
+  } catch (e) {}
+  return 'screen_0';
+};
+
+const getInitialInstances = () => {
+  const screenId = getScreenId();
+  try {
+    const saved = localStorage.getItem(`${POS_KEY}_instances_${screenId}`);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (e) {}
+
+  const defaultW = configuredCommand ? 520 : 420;
+  const defaultH = configuredCommand ? 300 : 220;
+
+  try {
+    const saved = localStorage.getItem(`${POS_KEY}_${screenId}`);
+    const savedSize = localStorage.getItem(`${SIZE_KEY}_${screenId}`) || localStorage.getItem(SIZE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      const parsedSize = savedSize ? JSON.parse(savedSize) : null;
+      if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
+        return [{
+          id: 'default',
+          x: Math.max(SCREEN_MARGIN, parsed.x),
+          y: Math.max(SCREEN_MARGIN, parsed.y),
+          w: parsedSize?.w || defaultW,
+          h: parsedSize?.h || defaultH,
+        }];
+      }
+    }
+  } catch (e) {}
+
   try {
     const saved = localStorage.getItem(POS_KEY);
+    const savedSize = localStorage.getItem(SIZE_KEY);
     if (saved) {
       const parsed = JSON.parse(saved);
+      const parsedSize = savedSize ? JSON.parse(savedSize) : null;
       if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
-        const maxX = Math.max(SCREEN_MARGIN, (window.innerWidth || 1920) - 220);
-        const maxY = Math.max(SCREEN_MARGIN, (window.innerHeight || 1080) - 120);
-        return {
-          x: Math.max(SCREEN_MARGIN, Math.min(maxX, parsed.x)),
-          y: Math.max(SCREEN_MARGIN, Math.min(maxY, parsed.y)),
-        };
+        return [{
+          id: 'default',
+          x: Math.max(SCREEN_MARGIN, parsed.x),
+          y: Math.max(SCREEN_MARGIN, parsed.y),
+          w: parsedSize?.w || defaultW,
+          h: parsedSize?.h || defaultH,
+        }];
       }
     }
   } catch (e) {}
-  return { x: SNAP_MARGIN_X, y: snapTop };
+
+  return [{
+    id: 'default',
+    x: SNAP_MARGIN_X,
+    y: SNAP_MARGIN_TOP,
+    w: defaultW,
+    h: defaultH,
+  }];
 };
 
-const getInitialSize = () => {
+const saveInstances = (instances) => {
+  const screenId = getScreenId();
   try {
-    const saved = localStorage.getItem(SIZE_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (typeof parsed.w === 'number' && typeof parsed.h === 'number') {
-        return {
-          w: Math.max(220, Math.min((window.innerWidth || 1920) - 20, parsed.w)),
-          h: Math.max(120, Math.min((window.innerHeight || 1080) - 20, parsed.h)),
-        };
-      }
+    localStorage.setItem(`${POS_KEY}_instances_${screenId}`, JSON.stringify(instances));
+    if (instances && instances[0]) {
+      localStorage.setItem(`${POS_KEY}_${screenId}`, JSON.stringify({ x: instances[0].x, y: instances[0].y }));
+      localStorage.setItem(`${SIZE_KEY}_${screenId}`, JSON.stringify({ w: instances[0].w, h: instances[0].h }));
     }
   } catch (e) {}
-  return configuredCommand ? { w: 520, h: 300 } : { w: 420, h: 220 };
 };
 
-const initialPos = getInitialPosition();
-const initialSize = getInitialSize();
+const initialInstances = getInitialInstances();
 
 export const initialState = {
-  x: initialPos.x,
-  y: initialPos.y,
-  w: initialSize.w,
-  h: initialSize.h,
+  instances: initialInstances,
+  x: initialInstances[0]?.x ?? SNAP_MARGIN_X,
+  y: initialInstances[0]?.y ?? SNAP_MARGIN_TOP,
+  w: initialInstances[0]?.w ?? (configuredCommand ? 520 : 420),
+  h: initialInstances[0]?.h ?? (configuredCommand ? 300 : 220),
   enableSnapping: getInitialSnapping(),
   isDragging: false,
+  draggingInstanceId: null,
   isResizing: false,
+  resizingInstanceId: null,
   dragStartX: 0,
   dragStartY: 0,
   startPosX: 0,
@@ -350,34 +405,45 @@ export const updateState = (event, previousState) => {
     return {
       ...previousState,
       isDragging: true,
+      draggingInstanceId: event.instanceId,
       dragStartX: event.clientX,
       dragStartY: event.clientY,
-      startPosX: previousState.x,
-      startPosY: previousState.y,
+      startPosX: event.startPosX !== undefined ? event.startPosX : previousState.x,
+      startPosY: event.startPosY !== undefined ? event.startPosY : previousState.y,
+      startW: event.w || previousState.w || 420,
+      startH: event.h || previousState.h || 220,
     };
   }
 
-  if (event.type === 'MOVE_DRAG' && previousState.isDragging) {
+  if (event.type === 'MOVE_DRAG' && previousState.isDragging && previousState.draggingInstanceId) {
     const deltaX = event.clientX - previousState.dragStartX;
     const deltaY = event.clientY - previousState.dragStartY;
+    const cardW = previousState.startW || previousState.w || 420;
+    const cardH = previousState.startH || previousState.h || 220;
 
     const bypassSnap = previousState.enableSnapping === false || event.bypassSnap || event.metaKey;
     const { x: newX, y: newY } = calculateSnappedPosition(
       previousState.startPosX + deltaX,
       previousState.startPosY + deltaY,
-      previousState.w,
-      previousState.h,
+      cardW,
+      cardH,
       bypassSnap
     );
 
-    try {
-      localStorage.setItem(POS_KEY, JSON.stringify({ x: newX, y: newY }));
-    } catch (e) {}
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (inst.id === previousState.draggingInstanceId) {
+        return { ...inst, x: newX, y: newY };
+      }
+      return inst;
+    });
+
+    saveInstances(updatedInstances);
 
     return {
       ...previousState,
-      x: newX,
-      y: newY,
+      instances: updatedInstances,
+      x: updatedInstances[0]?.x ?? newX,
+      y: updatedInstances[0]?.y ?? newY,
     };
   }
 
@@ -385,6 +451,7 @@ export const updateState = (event, previousState) => {
     return {
       ...previousState,
       isDragging: false,
+      draggingInstanceId: null,
     };
   }
 
@@ -392,28 +459,34 @@ export const updateState = (event, previousState) => {
     return {
       ...previousState,
       isResizing: true,
+      resizingInstanceId: event.instanceId,
       resizeStartX: event.clientX,
       resizeStartY: event.clientY,
-      startW: previousState.w,
-      startH: previousState.h,
+      startW: event.startW !== undefined ? event.startW : previousState.w,
+      startH: event.startH !== undefined ? event.startH : previousState.h,
+      startPosX: event.startPosX !== undefined ? event.startPosX : previousState.x,
+      startPosY: event.startPosY !== undefined ? event.startPosY : previousState.y,
     };
   }
 
-  if (event.type === 'MOVE_RESIZE' && previousState.isResizing) {
+  if (event.type === 'MOVE_RESIZE' && previousState.isResizing && previousState.resizingInstanceId) {
     const deltaW = event.clientX - previousState.resizeStartX;
     const deltaH = event.clientY - previousState.resizeStartY;
 
+    const currentX = previousState.startPosX !== undefined ? previousState.startPosX : previousState.x;
+    const currentY = previousState.startPosY !== undefined ? previousState.startPosY : previousState.y;
+
     const winW = window.innerWidth || 1920;
     const winH = window.innerHeight || 1080;
-    const maxW = Math.max(220, winW - previousState.x);
-    const maxH = Math.max(120, winH - previousState.y);
+    const maxW = Math.max(220, winW - currentX);
+    const maxH = Math.max(120, winH - currentY);
 
     let newW = Math.max(220, Math.min(maxW, previousState.startW + deltaW));
     let newH = Math.max(120, Math.min(maxH, previousState.startH + deltaH));
 
     if (previousState.enableSnapping !== false && !event.bypassSnap && !event.metaKey) {
-      const snapW = winW - previousState.x - SNAP_MARGIN_X;
-      const snapH = winH - previousState.y - SNAP_MARGIN_BOTTOM;
+      const snapW = winW - currentX - SNAP_MARGIN_X;
+      const snapH = winH - currentY - SNAP_MARGIN_BOTTOM;
       if (newW >= snapW - SNAP_THRESHOLD && newW <= snapW + SNAP_EDGE_TOLERANCE && snapW >= 220) {
         newW = snapW;
       }
@@ -422,14 +495,20 @@ export const updateState = (event, previousState) => {
       }
     }
 
-    try {
-      localStorage.setItem(SIZE_KEY, JSON.stringify({ w: newW, h: newH }));
-    } catch (e) {}
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (inst.id === previousState.resizingInstanceId) {
+        return { ...inst, w: newW, h: newH };
+      }
+      return inst;
+    });
+
+    saveInstances(updatedInstances);
 
     return {
       ...previousState,
-      w: newW,
-      h: newH,
+      instances: updatedInstances,
+      w: updatedInstances[0]?.w ?? newW,
+      h: updatedInstances[0]?.h ?? newH,
     };
   }
 
@@ -437,6 +516,7 @@ export const updateState = (event, previousState) => {
     return {
       ...previousState,
       isResizing: false,
+      resizingInstanceId: null,
     };
   }
 
@@ -449,7 +529,9 @@ export const updateState = (event, previousState) => {
 
   if (event.type === 'TOGGLE_SNAPPING') {
     const nextVal = previousState.enableSnapping === false ? true : false;
+    const screenId = getScreenId();
     try {
+      localStorage.setItem(`${STORAGE_SNAP_KEY}_${screenId}`, String(nextVal));
       localStorage.setItem(STORAGE_SNAP_KEY, String(nextVal));
     } catch (e) {}
     return {
@@ -461,14 +543,57 @@ export const updateState = (event, previousState) => {
   if (event.type === 'RESET_POSITION') {
     const defaultX = SNAP_MARGIN_X;
     const defaultY = SNAP_MARGIN_TOP;
-    try {
-      localStorage.setItem(POS_KEY, JSON.stringify({ x: defaultX, y: defaultY }));
-    } catch (e) {}
+    const targetId = event.instanceId;
+    const updatedInstances = (previousState.instances || []).map((i) => {
+      if (i.id === targetId || (!targetId && i.id === (previousState.instances?.[0]?.id || 'default'))) {
+        return { ...i, x: defaultX, y: defaultY };
+      }
+      return i;
+    });
+    saveInstances(updatedInstances);
     return {
       ...previousState,
-      x: defaultX,
-      y: defaultY,
+      instances: updatedInstances,
+      x: updatedInstances[0]?.x ?? defaultX,
+      y: updatedInstances[0]?.y ?? defaultY,
     };
+  }
+
+  if (event.type === 'DUPLICATE_WIDGET') {
+    const defaultW = configuredCommand ? 520 : 420;
+    const defaultH = configuredCommand ? 300 : 220;
+    const current = previousState.instances && previousState.instances.length > 0
+      ? previousState.instances
+      : [{ id: 'default', x: previousState.x || SNAP_MARGIN_X, y: previousState.y || SNAP_MARGIN_TOP, w: previousState.w || defaultW, h: previousState.h || defaultH }];
+    const target = current.find(i => i.id === event.instanceId) || current[current.length - 1];
+    const newInst = {
+      ...target,
+      id: `inst_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+      x: (target.x || SNAP_MARGIN_X) + 30,
+      y: (target.y || SNAP_MARGIN_TOP) + 30,
+    };
+    const updatedInstances = [...current, newInst];
+    saveInstances(updatedInstances);
+    return {
+      ...previousState,
+      instances: updatedInstances,
+    };
+  }
+
+  if (event.type === 'REMOVE_WIDGET') {
+    const current = previousState.instances || [];
+    if (current.length > 1) {
+      const updatedInstances = current.filter(i => i.id !== event.instanceId);
+      saveInstances(updatedInstances);
+      return {
+        ...previousState,
+        instances: updatedInstances,
+      };
+    } else {
+      const wid = event.widgetId || 'shell-widget-index-jsx';
+      run(`osascript -e 'tell application id "tracesOf.Uebersicht" to set hidden of widget id "${wid}" to true'`);
+      return previousState;
+    }
   }
 
   if (event.type === 'ORDER_CHANGED') {
@@ -600,12 +725,6 @@ if (typeof window !== 'undefined' && !window.__uebersicht_order_listener_shell) 
 export const render = (state, dispatch) => {
   currentDispatch = dispatch;
   const {
-    x = 50,
-    y = 220,
-    w = 420,
-    h = 220,
-    isDragging,
-    isResizing,
     enableSnapping = true,
     lines = [],
     inputValue = '',
@@ -613,6 +732,16 @@ export const render = (state, dispatch) => {
     historyIndex = -1,
     isRunning = false,
   } = state || {};
+
+  const instances = (state && state.instances && state.instances.length > 0)
+    ? state.instances
+    : [{
+        id: 'default',
+        x: state?.x ?? SNAP_MARGIN_X,
+        y: state?.y ?? SNAP_MARGIN_TOP,
+        w: state?.w ?? (configuredCommand ? 520 : 420),
+        h: state?.h ?? (configuredCommand ? 300 : 220),
+      }];
 
   const isSingleCommandMode = Boolean(configuredCommand);
   const showPrompt = settings.showPrompt !== undefined ? settings.showPrompt : !isSingleCommandMode;
@@ -638,166 +767,6 @@ export const render = (state, dispatch) => {
           : (err?.message || String(err));
         dispatch({ type: 'UB/COMMAND_RAN', error: errMsg });
       });
-  };
-
-  const handleMouseDown = (e) => {
-    if (e.button !== 0) return;
-    if (e.target.closest('input, textarea, button, a, [data-no-drag="true"]')) return;
-
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const isDragHandle = Boolean(e.target.closest('[data-drag-handle="true"]'));
-
-    const preventSelect = (selEvent) => {
-      selEvent.preventDefault();
-    };
-
-    // Alt/Option key bypass OR explicit drag handle: drag immediately
-    if (e.altKey || isDragHandle) {
-      e.preventDefault();
-      try {
-        if (window.getSelection) {
-          window.getSelection().removeAllRanges();
-        }
-      } catch (err) {}
-      window.addEventListener('selectstart', preventSelect, true);
-      try {
-        document.body.style.userSelect = 'none';
-        document.body.style.webkitUserSelect = 'none';
-        document.body.style.cursor = 'grabbing';
-      } catch (err) {}
-      dispatch({ type: 'START_DRAG', clientX: startX, clientY: startY });
-
-      const onMouseMove = (moveEvent) => {
-        moveEvent.preventDefault();
-        dispatch({
-          type: 'MOVE_DRAG',
-          clientX: moveEvent.clientX,
-          clientY: moveEvent.clientY,
-          bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
-        });
-      };
-
-      const onMouseUp = () => {
-        window.removeEventListener('selectstart', preventSelect, true);
-        try {
-          document.body.style.userSelect = '';
-          document.body.style.webkitUserSelect = '';
-          document.body.style.cursor = '';
-          if (window.getSelection) {
-            window.getSelection().removeAllRanges();
-          }
-        } catch (err) {}
-        dispatch({ type: 'END_DRAG' });
-        window.removeEventListener('mousemove', onMouseMove);
-        window.removeEventListener('mouseup', onMouseUp);
-      };
-
-      window.addEventListener('mousemove', onMouseMove);
-      window.addEventListener('mouseup', onMouseUp);
-      return;
-    }
-
-    // Default behavior is standard text selection.
-    // On a long-press (held for ~320ms without moving > 4px),
-    // widget engages drag mode, clears any selection, and suppresses text selection.
-    let dragStarted = false;
-    let holdTimer = setTimeout(() => {
-      dragStarted = true;
-      try {
-        if (window.getSelection) {
-          window.getSelection().removeAllRanges();
-        }
-      } catch (err) {}
-      window.addEventListener('selectstart', preventSelect, true);
-      try {
-        document.body.style.userSelect = 'none';
-        document.body.style.webkitUserSelect = 'none';
-        document.body.style.cursor = 'grabbing';
-      } catch (err) {}
-      dispatch({ type: 'START_DRAG', clientX: startX, clientY: startY });
-    }, 320);
-
-    const onMouseMove = (moveEvent) => {
-      const dist = Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY);
-      if (!dragStarted) {
-        if (dist > 4) {
-          // Moved before long-press threshold: user is dragging to select text!
-          if (holdTimer) {
-            clearTimeout(holdTimer);
-            holdTimer = null;
-          }
-          // Normal native text selection continues freely
-        }
-      } else {
-        // Drag mode active: suppress text selection completely!
-        moveEvent.preventDefault();
-        moveEvent.stopPropagation();
-        try {
-          if (window.getSelection && window.getSelection().rangeCount > 0) {
-            window.getSelection().removeAllRanges();
-          }
-        } catch (err) {}
-        dispatch({
-          type: 'MOVE_DRAG',
-          clientX: moveEvent.clientX,
-          clientY: moveEvent.clientY,
-          bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
-        });
-      }
-    };
-
-    const onMouseUp = () => {
-      if (holdTimer) {
-        clearTimeout(holdTimer);
-        holdTimer = null;
-      }
-      if (dragStarted) {
-        window.removeEventListener('selectstart', preventSelect, true);
-        try {
-          document.body.style.userSelect = '';
-          document.body.style.webkitUserSelect = '';
-          document.body.style.cursor = '';
-        } catch (err) {}
-        try {
-          if (window.getSelection) {
-            window.getSelection().removeAllRanges();
-          }
-        } catch (err) {}
-        dispatch({ type: 'END_DRAG' });
-      }
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    };
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-  };
-
-  const handleResizeStart = (e) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    e.stopPropagation();
-
-    dispatch({ type: 'START_RESIZE', clientX: e.clientX, clientY: e.clientY });
-
-    const onMouseMove = (moveEvent) => {
-      dispatch({
-        type: 'MOVE_RESIZE',
-        clientX: moveEvent.clientX,
-        clientY: moveEvent.clientY,
-        bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
-      });
-    };
-
-    const onMouseUp = () => {
-      dispatch({ type: 'END_RESIZE' });
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    };
-
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
   };
 
   const executeCommand = (cmd) => {
@@ -923,284 +892,478 @@ export const render = (state, dispatch) => {
     }
   };
 
-  const handleContextMenu = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-
-    const canRerun = isSingleCommandMode ? Boolean(configuredCommand) : Boolean(history && history.length > 0);
-    const payload = JSON.stringify({
-      enableSnapping: enableSnapping !== false,
-      canRerun,
-      rerunTitle: 'Run Again',
-      x: Math.round(x),
-      y: Math.round(y),
-    });
-
-    const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/shell.widget/menu_helper';
-    const fallbackPath = './shell.widget/menu_helper';
-    const escapedPayload = payload.replace(/'/g, "'\\''");
-    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
-
-    run(cmd, (err, output) => {
-      if (err || !output) return;
-      try {
-        const res = JSON.parse(output.trim());
-        if (!res || !res.action) return;
-
-        if (res.action === 'RUN_AGAIN' || res.action === 'RERUN_COMMAND') {
-          handleRunAgain();
-        } else if (res.action === 'TOGGLE_SNAPPING') {
-          dispatch({ type: 'TOGGLE_SNAPPING' });
-        } else if (res.action === 'RESET_POSITION') {
-          dispatch({ type: 'RESET_POSITION' });
-        } else if (res.action === 'RELOAD_WIDGET') {
-          const wid = res.widgetId || 'shell-widget-index-jsx';
-          run(`osascript -e 'tell application id "tracesOf.Uebersicht" to reload widget id "${wid}"' 2>/dev/null || osascript -e 'tell application id "tracesOf.Uebersicht" to refresh'`);
-        } else if (res.action === 'REMOVE_WIDGET') {
-          const wid = res.widgetId || 'shell-widget-index-jsx';
-          const dir = res.widgetDir || '';
-          const folder = res.widgetFolder || '';
-          const isDuplicate = /(-copy|\bcopy\b|-\d+)\.widget$/i.test(folder);
-          if (isDuplicate && dir) {
-            run(`osascript -e 'tell application "Finder" to delete POSIX file "${dir}"'`);
-          } else {
-            run(`osascript -e 'tell application id "tracesOf.Uebersicht" to set hidden of widget id "${wid}" to true'`);
-          }
-        } else if (res.action === 'DUPLICATE_WIDGET') {
-          run(`osascript -e 'tell application id "tracesOf.Uebersicht" to refresh'`);
-        } else if (res.action === 'ORDER_FRONT' || res.action === 'ORDER_FORWARD' || res.action === 'ORDER_BACKWARD' || res.action === 'ORDER_BACK') {
-          reorderWidget('shell', res.action);
-          dispatch({ type: 'ORDER_CHANGED' });
-        }
-      } catch (parseErr) {}
-    });
-  };
-
-  const positionStyle = {
-    position: 'absolute',
-    top: `${y}px`,
-    left: `${x}px`,
-    width: `${w}px`,
-    height: `${h}px`,
-    zIndex: isDragging ? 9999 : getWidgetZIndex('shell'),
-    cursor: isDragging ? 'grabbing' : isResizing ? 'se-resize' : 'default',
-    boxSizing: 'border-box',
-  };
-
   const promptSymbol = settings.promptSymbol || '❯';
   const promptPlaceholder = settings.placeholder || 'run command...';
   const windowTitle = settings.title || 'zsh';
 
   return (
-    <div
-      className={isDragging ? 'shell-dragging' : ''}
-      style={{
-        ...positionStyle,
-        userSelect: isDragging ? 'none' : 'text',
-        WebkitUserSelect: isDragging ? 'none' : 'text',
-      }}
-      onMouseDown={handleMouseDown}
-      onContextMenu={handleContextMenu}
-      tabIndex={0}
-      onKeyDown={(e) => {
-        if ((e.key === 'Escape' || (e.ctrlKey && e.key === 'c')) && isRunning) {
+    <React.Fragment>
+      {instances.map((instance) => {
+        const x = instance.x ?? SNAP_MARGIN_X;
+        const y = instance.y ?? SNAP_MARGIN_TOP;
+        const w = instance.w ?? (configuredCommand ? 520 : 420);
+        const h = instance.h ?? (configuredCommand ? 300 : 220);
+        const isDragging = state?.isDragging && state?.draggingInstanceId === instance.id;
+        const isResizing = state?.isResizing && state?.resizingInstanceId === instance.id;
+
+        const handleMouseDown = (e) => {
+          if (e.button !== 0) return;
+          if (e.target.closest('input, textarea, button, a, [data-no-drag="true"]')) return;
+
+          const startX = e.clientX;
+          const startY = e.clientY;
+          const isDragHandle = Boolean(e.target.closest('[data-drag-handle="true"]'));
+
+          const preventSelect = (selEvent) => {
+            selEvent.preventDefault();
+          };
+
+          // Alt/Option key bypass OR explicit drag handle: drag immediately
+          if (e.altKey || isDragHandle) {
+            e.preventDefault();
+            try {
+              if (window.getSelection) {
+                window.getSelection().removeAllRanges();
+              }
+            } catch (err) {}
+            window.addEventListener('selectstart', preventSelect, true);
+            try {
+              document.body.style.userSelect = 'none';
+              document.body.style.webkitUserSelect = 'none';
+              document.body.style.cursor = 'grabbing';
+            } catch (err) {}
+            dispatch({
+              type: 'START_DRAG',
+              instanceId: instance.id,
+              clientX: startX,
+              clientY: startY,
+              startPosX: x,
+              startPosY: y,
+              w,
+              h,
+            });
+
+            const onMouseMove = (moveEvent) => {
+              moveEvent.preventDefault();
+              dispatch({
+                type: 'MOVE_DRAG',
+                clientX: moveEvent.clientX,
+                clientY: moveEvent.clientY,
+                bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
+              });
+            };
+
+            const onMouseUp = () => {
+              window.removeEventListener('selectstart', preventSelect, true);
+              try {
+                document.body.style.userSelect = '';
+                document.body.style.webkitUserSelect = '';
+                document.body.style.cursor = '';
+                if (window.getSelection) {
+                  window.getSelection().removeAllRanges();
+                }
+              } catch (err) {}
+              dispatch({ type: 'END_DRAG' });
+              window.removeEventListener('mousemove', onMouseMove);
+              window.removeEventListener('mouseup', onMouseUp);
+            };
+
+            window.addEventListener('mousemove', onMouseMove);
+            window.addEventListener('mouseup', onMouseUp);
+            return;
+          }
+
+          // Default behavior is standard text selection.
+          // On a long-press (held for ~320ms without moving > 4px),
+          // widget engages drag mode, clears any selection, and suppresses text selection.
+          let dragStarted = false;
+          let holdTimer = setTimeout(() => {
+            dragStarted = true;
+            try {
+              if (window.getSelection) {
+                window.getSelection().removeAllRanges();
+              }
+            } catch (err) {}
+            window.addEventListener('selectstart', preventSelect, true);
+            try {
+              document.body.style.userSelect = 'none';
+              document.body.style.webkitUserSelect = 'none';
+              document.body.style.cursor = 'grabbing';
+            } catch (err) {}
+            dispatch({
+              type: 'START_DRAG',
+              instanceId: instance.id,
+              clientX: startX,
+              clientY: startY,
+              startPosX: x,
+              startPosY: y,
+              w,
+              h,
+            });
+          }, 320);
+
+          const onMouseMove = (moveEvent) => {
+            const dist = Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY);
+            if (!dragStarted) {
+              if (dist > 4) {
+                // Moved before long-press threshold: user is dragging to select text!
+                if (holdTimer) {
+                  clearTimeout(holdTimer);
+                  holdTimer = null;
+                }
+                // Normal native text selection continues freely
+              }
+            } else {
+              // Drag mode active: suppress text selection completely!
+              moveEvent.preventDefault();
+              moveEvent.stopPropagation();
+              try {
+                if (window.getSelection && window.getSelection().rangeCount > 0) {
+                  window.getSelection().removeAllRanges();
+                }
+              } catch (err) {}
+              dispatch({
+                type: 'MOVE_DRAG',
+                clientX: moveEvent.clientX,
+                clientY: moveEvent.clientY,
+                bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
+              });
+            }
+          };
+
+          const onMouseUp = () => {
+            if (holdTimer) {
+              clearTimeout(holdTimer);
+              holdTimer = null;
+            }
+            if (dragStarted) {
+              window.removeEventListener('selectstart', preventSelect, true);
+              try {
+                document.body.style.userSelect = '';
+                document.body.style.webkitUserSelect = '';
+                document.body.style.cursor = '';
+              } catch (err) {}
+              try {
+                if (window.getSelection) {
+                  window.getSelection().removeAllRanges();
+                }
+              } catch (err) {}
+              dispatch({ type: 'END_DRAG' });
+            }
+            window.removeEventListener('mousemove', onMouseMove);
+            window.removeEventListener('mouseup', onMouseUp);
+          };
+
+          window.addEventListener('mousemove', onMouseMove);
+          window.addEventListener('mouseup', onMouseUp);
+        };
+
+        const handleResizeStart = (e) => {
+          if (e.button !== 0) return;
           e.preventDefault();
-          dispatch({ type: 'CANCEL_COMMAND' });
-        }
-      }}
-    >
-      <div
-        style={windowStyle}
-        onDoubleClick={isSingleCommandMode ? handleRefresh : undefined}
-      >
-        {/* Optional Title Bar (matching cava.widget, hidden when showTitleBar is false) */}
-        {settings.showTitleBar && (
-          <div style={titleBarStyle} data-drag-handle="true">
-            <div style={trafficLightsStyle}>
-              <span
-                style={{ ...dotStyle, backgroundColor: '#ff5f56' }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  dispatch({ type: 'CLEAR_LINES' });
+          e.stopPropagation();
+
+          dispatch({
+            type: 'START_RESIZE',
+            instanceId: instance.id,
+            clientX: e.clientX,
+            clientY: e.clientY,
+            startW: w,
+            startH: h,
+            startPosX: x,
+            startPosY: y,
+          });
+
+          const onMouseMove = (moveEvent) => {
+            dispatch({
+              type: 'MOVE_RESIZE',
+              clientX: moveEvent.clientX,
+              clientY: moveEvent.clientY,
+              bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
+            });
+          };
+
+          const onMouseUp = () => {
+            dispatch({ type: 'END_RESIZE' });
+            window.removeEventListener('mousemove', onMouseMove);
+            window.removeEventListener('mouseup', onMouseUp);
+          };
+
+          window.addEventListener('mousemove', onMouseMove);
+          window.addEventListener('mouseup', onMouseUp);
+        };
+
+        const handleContextMenu = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+
+          const canRerun = isSingleCommandMode ? Boolean(configuredCommand) : Boolean(history && history.length > 0);
+          const payload = JSON.stringify({
+            instanceId: instance.id,
+            enableSnapping: enableSnapping !== false,
+            canRerun,
+            rerunTitle: 'Run Again',
+            x: Math.round(x),
+            y: Math.round(y),
+          });
+
+          const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/shell.widget/menu_helper';
+          const fallbackPath = './shell.widget/menu_helper';
+          const escapedPayload = payload.replace(/'/g, "'\\''");
+          const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
+
+          run(cmd, (err, output) => {
+            if (err || !output) return;
+            try {
+              const res = JSON.parse(output.trim());
+              if (!res || !res.action) return;
+
+              if (res.action === 'RUN_AGAIN' || res.action === 'RERUN_COMMAND') {
+                handleRunAgain();
+              } else if (res.action === 'TOGGLE_SNAPPING') {
+                dispatch({ type: 'TOGGLE_SNAPPING' });
+              } else if (res.action === 'RESET_POSITION') {
+                dispatch({ type: 'RESET_POSITION', instanceId: res.instanceId || instance.id });
+              } else if (res.action === 'RELOAD_WIDGET') {
+                const wid = res.widgetId || 'shell-widget-index-jsx';
+                run(`osascript -e 'tell application id "tracesOf.Uebersicht" to reload widget id "${wid}"' 2>/dev/null || osascript -e 'tell application id "tracesOf.Uebersicht" to refresh'`);
+              } else if (res.action === 'REMOVE_WIDGET') {
+                dispatch({ type: 'REMOVE_WIDGET', instanceId: res.instanceId || instance.id, widgetId: res.widgetId || 'shell-widget-index-jsx' });
+              } else if (res.action === 'DUPLICATE_WIDGET') {
+                dispatch({ type: 'DUPLICATE_WIDGET', instanceId: res.instanceId || instance.id });
+              } else if (res.action === 'ORDER_FRONT' || res.action === 'ORDER_FORWARD' || res.action === 'ORDER_BACKWARD' || res.action === 'ORDER_BACK') {
+                reorderWidget('shell', res.action);
+                dispatch({ type: 'ORDER_CHANGED' });
+              }
+            } catch (parseErr) {}
+          });
+        };
+
+        const positionStyle = {
+          position: 'absolute',
+          top: `${y}px`,
+          left: `${x}px`,
+          width: `${w}px`,
+          height: `${h}px`,
+          zIndex: isDragging ? 9999 : getWidgetZIndex('shell'),
+          cursor: isDragging ? 'grabbing' : isResizing ? 'se-resize' : 'default',
+          boxSizing: 'border-box',
+        };
+
+        return (
+          <div
+            key={instance.id}
+            className={isDragging ? 'shell-dragging' : ''}
+            style={{
+              ...positionStyle,
+              userSelect: isDragging ? 'none' : 'text',
+              WebkitUserSelect: isDragging ? 'none' : 'text',
+            }}
+            onMouseDown={handleMouseDown}
+            onContextMenu={handleContextMenu}
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if ((e.key === 'Escape' || (e.ctrlKey && e.key === 'c')) && isRunning) {
+                e.preventDefault();
+                dispatch({ type: 'CANCEL_COMMAND' });
+              }
+            }}
+          >
+            <div
+              style={windowStyle}
+              onDoubleClick={isSingleCommandMode ? handleRefresh : undefined}
+            >
+              {/* Optional Title Bar (matching cava.widget, hidden when showTitleBar is false) */}
+              {settings.showTitleBar && (
+                <div style={titleBarStyle} data-drag-handle="true">
+                  <div style={trafficLightsStyle}>
+                    <span
+                      style={{ ...dotStyle, backgroundColor: '#ff5f56' }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        dispatch({ type: 'CLEAR_LINES' });
+                      }}
+                      title="Clear terminal"
+                      data-no-drag="true"
+                    />
+                    <span style={{ ...dotStyle, backgroundColor: '#ffbd2e' }} />
+                    <span style={{ ...dotStyle, backgroundColor: '#27c93f' }} />
+                  </div>
+                  <div style={titleTextStyle}>{windowTitle}</div>
+                  <div style={{ width: '48px' }} />
+                </div>
+              )}
+
+              {/* Force clean translucent scrollbars on WebKit without browser white borders */}
+              <style dangerouslySetInnerHTML={{ __html: `
+                /* When dragging: immediately freeze all text selection and set grabbing cursor */
+                .shell-dragging,
+                .shell-dragging * {
+                  user-select: none !important;
+                  -webkit-user-select: none !important;
+                  cursor: grabbing !important;
+                }
+
+                .shell-terminal-scroll,
+                .shell-terminal-scroll pre,
+                .shell-terminal-scroll span,
+                .shell-terminal-scroll div {
+                  cursor: default;
+                }
+
+                .shell-terminal-scroll,
+                .shell-terminal-scroll * {
+                  color-scheme: dark !important;
+                  scrollbar-width: auto !important;
+                  scrollbar-color: auto !important;
+                }
+                .shell-terminal-scroll::-webkit-scrollbar,
+                .shell-terminal-scroll *::-webkit-scrollbar {
+                  width: 4px !important;
+                  height: 4px !important;
+                  background: transparent !important;
+                  background-color: rgba(0, 0, 0, 0) !important;
+                }
+                .shell-terminal-scroll::-webkit-scrollbar-track,
+                .shell-terminal-scroll *::-webkit-scrollbar-track,
+                .shell-terminal-scroll::-webkit-scrollbar-track-piece,
+                .shell-terminal-scroll *::-webkit-scrollbar-track-piece {
+                  background: transparent !important;
+                  background-color: rgba(0, 0, 0, 0) !important;
+                  border: none !important;
+                  box-shadow: none !important;
+                }
+                .shell-terminal-scroll::-webkit-scrollbar-thumb,
+                .shell-terminal-scroll *::-webkit-scrollbar-thumb {
+                  background: rgba(255, 255, 255, 0.18) !important;
+                  background-color: rgba(255, 255, 255, 0.18) !important;
+                  border-radius: 4px !important;
+                  border: none !important;
+                  box-shadow: none !important;
+                }
+                .shell-terminal-scroll::-webkit-scrollbar-thumb:hover,
+                .shell-terminal-scroll *::-webkit-scrollbar-thumb:hover {
+                  background: rgba(255, 255, 255, 0.35) !important;
+                  background-color: rgba(255, 255, 255, 0.35) !important;
+                }
+                .shell-terminal-scroll::-webkit-scrollbar-corner,
+                .shell-terminal-scroll *::-webkit-scrollbar-corner,
+                .shell-terminal-scroll::-webkit-resizer,
+                .shell-terminal-scroll *::-webkit-resizer {
+                  background: transparent !important;
+                  background-color: rgba(0, 0, 0, 0) !important;
+                  border: none !important;
+                  box-shadow: none !important;
+                }
+                .shell-terminal-scroll::-webkit-scrollbar-button,
+                .shell-terminal-scroll *::-webkit-scrollbar-button {
+                  display: none !important;
+                  width: 0 !important;
+                  height: 0 !important;
+                }
+              ` }} />
+
+              {/* Terminal Body */}
+              <div
+                className="shell-terminal-scroll"
+                ref={(el) => {
+                  if (el) {
+                    el.scrollTop = el.scrollHeight;
+                  }
                 }}
-                title="Clear terminal"
-                data-no-drag="true"
-              />
-              <span style={{ ...dotStyle, backgroundColor: '#ffbd2e' }} />
-              <span style={{ ...dotStyle, backgroundColor: '#27c93f' }} />
-            </div>
-            <div style={titleTextStyle}>{windowTitle}</div>
-            <div style={{ width: '48px' }} />
-          </div>
-        )}
+                style={{ ...terminalBodyStyle, cursor: isDragging ? 'grabbing' : 'default' }}
+                onClick={() => {
+                  if (showPrompt) {
+                    const sel = typeof window !== 'undefined' && window.getSelection ? window.getSelection().toString() : '';
+                    if (sel && sel.length > 0) return;
+                    const inputEl = document.getElementById(`shell-widget-input-${instance.id}`);
+                    if (inputEl) inputEl.focus();
+                  }
+                }}
+              >
+                {lines.map((line, idx) => {
+                  const lineText = typeof line?.text === 'string'
+                    ? line.text
+                    : (line?.text?.message || String(line?.text || ''));
+                  return (
+                    <div key={idx} style={lineStyle}>
+                      {line.type === 'command' ? (
+                        <span>
+                          <span style={{ color: ITERM2_THEME.yellow, marginRight: '6px', fontWeight: '700' }}>{promptSymbol}</span>
+                          <span style={{ color: ITERM2_THEME.brightWhite }}>{lineText}</span>
+                        </span>
+                      ) : line.type === 'error' ? (
+                        <span style={{ color: ITERM2_THEME.red }}>{lineText}</span>
+                      ) : (
+                        <pre style={preStyle}>{renderAnsiText(lineText)}</pre>
+                      )}
+                    </div>
+                  );
+                })}
 
-        {/* Force clean translucent scrollbars on WebKit without browser white borders */}
-        <style dangerouslySetInnerHTML={{ __html: `
-          /* When dragging: immediately freeze all text selection and set grabbing cursor */
-          .shell-dragging,
-          .shell-dragging * {
-            user-select: none !important;
-            -webkit-user-select: none !important;
-            cursor: grabbing !important;
-          }
+                {/* Loading Indicator for Single Command Mode */}
+                {isSingleCommandMode && lines.length === 0 && (
+                  <div style={runningRowStyle}>
+                    <span style={runningDotStyle} />
+                    <span style={runningTextStyle}>loading {configuredCommand}...</span>
+                  </div>
+                )}
 
-          .shell-terminal-scroll,
-          .shell-terminal-scroll pre,
-          .shell-terminal-scroll span,
-          .shell-terminal-scroll div {
-            cursor: default;
-          }
-
-          .shell-terminal-scroll,
-          .shell-terminal-scroll * {
-            color-scheme: dark !important;
-            scrollbar-width: auto !important;
-            scrollbar-color: auto !important;
-          }
-          .shell-terminal-scroll::-webkit-scrollbar,
-          .shell-terminal-scroll *::-webkit-scrollbar {
-            width: 4px !important;
-            height: 4px !important;
-            background: transparent !important;
-            background-color: rgba(0, 0, 0, 0) !important;
-          }
-          .shell-terminal-scroll::-webkit-scrollbar-track,
-          .shell-terminal-scroll *::-webkit-scrollbar-track,
-          .shell-terminal-scroll::-webkit-scrollbar-track-piece,
-          .shell-terminal-scroll *::-webkit-scrollbar-track-piece {
-            background: transparent !important;
-            background-color: rgba(0, 0, 0, 0) !important;
-            border: none !important;
-            box-shadow: none !important;
-          }
-          .shell-terminal-scroll::-webkit-scrollbar-thumb,
-          .shell-terminal-scroll *::-webkit-scrollbar-thumb {
-            background: rgba(255, 255, 255, 0.18) !important;
-            background-color: rgba(255, 255, 255, 0.18) !important;
-            border-radius: 4px !important;
-            border: none !important;
-            box-shadow: none !important;
-          }
-          .shell-terminal-scroll::-webkit-scrollbar-thumb:hover,
-          .shell-terminal-scroll *::-webkit-scrollbar-thumb:hover {
-            background: rgba(255, 255, 255, 0.35) !important;
-            background-color: rgba(255, 255, 255, 0.35) !important;
-          }
-          .shell-terminal-scroll::-webkit-scrollbar-corner,
-          .shell-terminal-scroll *::-webkit-scrollbar-corner,
-          .shell-terminal-scroll::-webkit-resizer,
-          .shell-terminal-scroll *::-webkit-resizer {
-            background: transparent !important;
-            background-color: rgba(0, 0, 0, 0) !important;
-            border: none !important;
-            box-shadow: none !important;
-          }
-          .shell-terminal-scroll::-webkit-scrollbar-button,
-          .shell-terminal-scroll *::-webkit-scrollbar-button {
-            display: none !important;
-            width: 0 !important;
-            height: 0 !important;
-          }
-        ` }} />
-
-        {/* Terminal Body */}
-        <div
-          className="shell-terminal-scroll"
-          ref={(el) => {
-            if (el) {
-              el.scrollTop = el.scrollHeight;
-            }
-          }}
-          style={{ ...terminalBodyStyle, cursor: isDragging ? 'grabbing' : 'default' }}
-          onClick={() => {
-            if (showPrompt) {
-              const sel = typeof window !== 'undefined' && window.getSelection ? window.getSelection().toString() : '';
-              if (sel && sel.length > 0) return;
-              const inputEl = document.getElementById('shell-widget-input');
-              if (inputEl) inputEl.focus();
-            }
-          }}
-        >
-          {lines.map((line, idx) => {
-            const lineText = typeof line?.text === 'string'
-              ? line.text
-              : (line?.text?.message || String(line?.text || ''));
-            return (
-              <div key={idx} style={lineStyle}>
-                {line.type === 'command' ? (
-                  <span>
-                    <span style={{ color: ITERM2_THEME.yellow, marginRight: '6px', fontWeight: '700' }}>{promptSymbol}</span>
-                    <span style={{ color: ITERM2_THEME.brightWhite }}>{lineText}</span>
-                  </span>
-                ) : line.type === 'error' ? (
-                  <span style={{ color: ITERM2_THEME.red }}>{lineText}</span>
-                ) : (
-                  <pre style={preStyle}>{renderAnsiText(lineText)}</pre>
+                {/* Active Running State or Interactive Prompt */}
+                {showPrompt && (
+                  isRunning ? (
+                    <div style={runningRowStyle}>
+                      <span style={runningDotStyle} />
+                      <span style={runningTextStyle}>running...</span>
+                      <span
+                        style={abortButtonStyle}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          dispatch({ type: 'CANCEL_COMMAND' });
+                        }}
+                        title="Cancel command (Ctrl+C / Esc)"
+                        data-no-drag="true"
+                      >
+                        ✕ cancel
+                      </span>
+                    </div>
+                  ) : (
+                    <div style={promptRowStyle}>
+                      <span style={promptSymbolStyle}>{promptSymbol}</span>
+                      <input
+                        id={`shell-widget-input-${instance.id}`}
+                        type="text"
+                        value={inputValue}
+                        onChange={(e) => dispatch({ type: 'SET_INPUT', value: e.target.value })}
+                        onKeyDown={handleKeyDown}
+                        placeholder={promptPlaceholder}
+                        style={inputStyle}
+                        data-no-drag="true"
+                        autoFocus={true}
+                      />
+                    </div>
+                  )
                 )}
               </div>
-            );
-          })}
 
-          {/* Loading Indicator for Single Command Mode */}
-          {isSingleCommandMode && lines.length === 0 && (
-            <div style={runningRowStyle}>
-              <span style={runningDotStyle} />
-              <span style={runningTextStyle}>loading {configuredCommand}...</span>
+              {/* Resize Handle */}
+              <div
+                data-no-drag="true"
+                style={resizeHandleStyle}
+                onMouseDown={handleResizeStart}
+                title="Drag to resize"
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                  <circle cx="8" cy="8" r="1" fill="rgba(255,255,255,0.35)" />
+                  <circle cx="8" cy="4" r="1" fill="rgba(255,255,255,0.35)" />
+                  <circle cx="4" cy="8" r="1" fill="rgba(255,255,255,0.35)" />
+                </svg>
+              </div>
             </div>
-          )}
-
-          {/* Active Running State or Interactive Prompt */}
-          {showPrompt && (
-            isRunning ? (
-              <div style={runningRowStyle}>
-                <span style={runningDotStyle} />
-                <span style={runningTextStyle}>running...</span>
-                <span
-                  style={abortButtonStyle}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    dispatch({ type: 'CANCEL_COMMAND' });
-                  }}
-                  title="Cancel command (Ctrl+C / Esc)"
-                  data-no-drag="true"
-                >
-                  ✕ cancel
-                </span>
-              </div>
-            ) : (
-              <div style={promptRowStyle}>
-                <span style={promptSymbolStyle}>{promptSymbol}</span>
-                <input
-                  id="shell-widget-input"
-                  type="text"
-                  value={inputValue}
-                  onChange={(e) => dispatch({ type: 'SET_INPUT', value: e.target.value })}
-                  onKeyDown={handleKeyDown}
-                  placeholder={promptPlaceholder}
-                  style={inputStyle}
-                  data-no-drag="true"
-                  autoFocus={true}
-                />
-              </div>
-            )
-          )}
-        </div>
-
-        {/* Resize Handle */}
-        <div
-          data-no-drag="true"
-          style={resizeHandleStyle}
-          onMouseDown={handleResizeStart}
-          title="Drag to resize"
-        >
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-            <circle cx="8" cy="8" r="1" fill="rgba(255,255,255,0.35)" />
-            <circle cx="8" cy="4" r="1" fill="rgba(255,255,255,0.35)" />
-            <circle cx="4" cy="8" r="1" fill="rgba(255,255,255,0.35)" />
-          </svg>
-        </div>
-      </div>
-    </div>
+          </div>
+        );
+      })}
+    </React.Fragment>
   );
 };
 
