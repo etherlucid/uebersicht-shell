@@ -3,6 +3,8 @@ import Foundation
 
 struct MenuState: Codable {
     var enableSnapping: Bool?
+    var canRerun: Bool?
+    var rerunTitle: String?
 }
 
 class MenuDelegate: NSObject {
@@ -37,12 +39,16 @@ menu.addItem(header)
 
 menu.addItem(NSMenuItem.separator())
 
-// Clear Output
-let clearItem = NSMenuItem(title: "Clear Output", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "k")
-clearItem.keyEquivalentModifierMask = [.command]
-clearItem.target = delegate
-clearItem.representedObject = "{\"action\":\"CLEAR_OUTPUT\"}"
-menu.addItem(clearItem)
+// Run Again (replacing clear output)
+let rerunTitle = state.rerunTitle ?? "Run Again"
+let rerunItem = NSMenuItem(title: rerunTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "r")
+rerunItem.keyEquivalentModifierMask = [.command]
+rerunItem.target = delegate
+rerunItem.representedObject = "{\"action\":\"RUN_AGAIN\"}"
+if let canRerun = state.canRerun {
+    rerunItem.isEnabled = canRerun
+}
+menu.addItem(rerunItem)
 
 menu.addItem(NSMenuItem.separator())
 

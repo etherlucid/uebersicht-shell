@@ -618,9 +618,9 @@ export const render = (state, dispatch) => {
   const showPrompt = settings.showPrompt !== undefined ? settings.showPrompt : !isSingleCommandMode;
 
   const handleRefresh = (e) => {
-    if (e) e.stopPropagation();
+    if (e && e.stopPropagation) e.stopPropagation();
     const sel = typeof window !== 'undefined' && window.getSelection ? window.getSelection().toString() : '';
-    if (sel && sel.length > 0) return;
+    if (e && sel && sel.length > 0) return;
     if (!configuredCommand) return;
     dispatch({ type: 'MANUAL_REFRESH' });
     const fullCmd = formatShellCommand(configuredCommand);
@@ -800,92 +800,107 @@ export const render = (state, dispatch) => {
     window.addEventListener('mouseup', onMouseUp);
   };
 
+  const executeCommand = (cmd) => {
+    if (!cmd) return;
+    if (cmd.toLowerCase() === 'clear') {
+      dispatch({ type: 'CLEAR_LINES' });
+      dispatch({ type: 'PUSH_HISTORY', cmd });
+      return;
+    }
+
+    // 1. Immediately record command and transition to running state
+    dispatch({ type: 'COMMAND_START', cmd });
+
+    // 2. Continuous / interactive guardrails
+    if (cmd === 'cava' || cmd.startsWith('cava ')) {
+      dispatch({
+        type: 'COMMAND_OUTPUT',
+        lineType: 'output',
+        text: 'cava: continuous interactive TUI audio visualizers cannot run in a desktop widget shell.\n' +
+              'cava requires a continuous bidirectional terminal session and macOS System Audio Recording permission for AudioTap.\n' +
+              'Tip: Use the dedicated cava.widget on your desktop for real-time visualization.',
+      });
+      return;
+    }
+
+    const firstWord = cmd.split(/\s+/)[0];
+    if (['vim', 'vi', 'nano', 'emacs'].includes(firstWord)) {
+      dispatch({
+        type: 'COMMAND_OUTPUT',
+        lineType: 'error',
+        text: `${firstWord}: interactive editor cannot run in a desktop widget shell.`,
+      });
+      return;
+    }
+
+    if (['less', 'more'].includes(firstWord)) {
+      dispatch({
+        type: 'COMMAND_OUTPUT',
+        lineType: 'error',
+        text: `${firstWord}: pager cannot run interactively. Use 'cat' or pipe to 'head'.`,
+      });
+      return;
+    }
+
+    // 3. Auto-snapshot & bound infinite tools
+    let execCmd = cmd;
+    if (cmd === 'top') {
+      execCmd = 'top -l 1';
+    } else if (/^ping\s+[^-\s]/.test(cmd) && !cmd.includes('-c')) {
+      execCmd = `${cmd} -c 4`;
+    }
+
+    const fullCmd = formatShellCommand(execCmd);
+
+    const timeoutMs = (settings.timeoutSeconds || 15) * 1000;
+    let hasCompleted = false;
+    const timer = setTimeout(() => {
+      if (!hasCompleted) {
+        hasCompleted = true;
+        dispatch({
+          type: 'COMMAND_OUTPUT',
+          lineType: 'error',
+          text: `[Process timed out after ${settings.timeoutSeconds || 15}s]`,
+        });
+      }
+    }, timeoutMs);
+
+    run(fullCmd)
+      .then((output) => {
+        if (hasCompleted) return;
+        hasCompleted = true;
+        clearTimeout(timer);
+        if (output && output.trim()) {
+          dispatch({ type: 'COMMAND_OUTPUT', lineType: 'output', text: output });
+        } else {
+          dispatch({ type: 'COMMAND_FINISHED' });
+        }
+      })
+      .catch((err) => {
+        if (hasCompleted) return;
+        hasCompleted = true;
+        clearTimeout(timer);
+        const errMsg = err?.message || String(err);
+        dispatch({ type: 'COMMAND_OUTPUT', lineType: 'error', text: errMsg });
+      });
+  };
+
+  const handleRunAgain = () => {
+    if (isSingleCommandMode) {
+      handleRefresh();
+    } else if (history && history.length > 0) {
+      const lastCmd = history[history.length - 1];
+      if (lastCmd) {
+        executeCommand(lastCmd);
+      }
+    }
+  };
+
   const handleKeyDown = (e) => {
     if (e.key === 'Enter') {
       const cmd = inputValue.trim();
       if (!cmd) return;
-
-      if (cmd.toLowerCase() === 'clear') {
-        dispatch({ type: 'CLEAR_LINES' });
-        dispatch({ type: 'PUSH_HISTORY', cmd });
-        return;
-      }
-
-      // 1. Immediately record command and transition to running state
-      dispatch({ type: 'COMMAND_START', cmd });
-
-      // 2. Continuous / interactive guardrails
-      if (cmd === 'cava' || cmd.startsWith('cava ')) {
-        dispatch({
-          type: 'COMMAND_OUTPUT',
-          lineType: 'output',
-          text: 'cava: continuous interactive TUI audio visualizers cannot run in a desktop widget shell.\n' +
-                'cava requires a continuous bidirectional terminal session and macOS System Audio Recording permission for AudioTap.\n' +
-                'Tip: Use the dedicated cava.widget on your desktop for real-time visualization.',
-        });
-        return;
-      }
-
-      const firstWord = cmd.split(/\s+/)[0];
-      if (['vim', 'vi', 'nano', 'emacs'].includes(firstWord)) {
-        dispatch({
-          type: 'COMMAND_OUTPUT',
-          lineType: 'error',
-          text: `${firstWord}: interactive editor cannot run in a desktop widget shell.`,
-        });
-        return;
-      }
-
-      if (['less', 'more'].includes(firstWord)) {
-        dispatch({
-          type: 'COMMAND_OUTPUT',
-          lineType: 'error',
-          text: `${firstWord}: pager cannot run interactively. Use 'cat' or pipe to 'head'.`,
-        });
-        return;
-      }
-
-      // 3. Auto-snapshot & bound infinite tools
-      let execCmd = cmd;
-      if (cmd === 'top') {
-        execCmd = 'top -l 1';
-      } else if (/^ping\s+[^-\s]/.test(cmd) && !cmd.includes('-c')) {
-        execCmd = `${cmd} -c 4`;
-      }
-
-      const fullCmd = formatShellCommand(execCmd);
-
-      const timeoutMs = (settings.timeoutSeconds || 15) * 1000;
-      let hasCompleted = false;
-      const timer = setTimeout(() => {
-        if (!hasCompleted) {
-          hasCompleted = true;
-          dispatch({
-            type: 'COMMAND_OUTPUT',
-            lineType: 'error',
-            text: `[Process timed out after ${settings.timeoutSeconds || 15}s]`,
-          });
-        }
-      }, timeoutMs);
-
-      run(fullCmd)
-        .then((output) => {
-          if (hasCompleted) return;
-          hasCompleted = true;
-          clearTimeout(timer);
-          if (output && output.trim()) {
-            dispatch({ type: 'COMMAND_OUTPUT', lineType: 'output', text: output });
-          } else {
-            dispatch({ type: 'COMMAND_FINISHED' });
-          }
-        })
-        .catch((err) => {
-          if (hasCompleted) return;
-          hasCompleted = true;
-          clearTimeout(timer);
-          const errMsg = err?.message || String(err);
-          dispatch({ type: 'COMMAND_OUTPUT', lineType: 'error', text: errMsg });
-        });
+      executeCommand(cmd);
     } else if (e.key === 'Escape' || (e.ctrlKey && e.key === 'c')) {
       e.preventDefault();
       dispatch({ type: 'CANCEL_COMMAND' });
@@ -912,8 +927,11 @@ export const render = (state, dispatch) => {
     e.preventDefault();
     e.stopPropagation();
 
+    const canRerun = isSingleCommandMode ? Boolean(configuredCommand) : Boolean(history && history.length > 0);
     const payload = JSON.stringify({
       enableSnapping: enableSnapping !== false,
+      canRerun,
+      rerunTitle: 'Run Again',
     });
 
     const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/shell.widget/menu_helper';
@@ -927,8 +945,8 @@ export const render = (state, dispatch) => {
         const res = JSON.parse(output.trim());
         if (!res || !res.action) return;
 
-        if (res.action === 'CLEAR_OUTPUT') {
-          dispatch({ type: 'CLEAR_OUTPUT' });
+        if (res.action === 'RUN_AGAIN' || res.action === 'RERUN_COMMAND') {
+          handleRunAgain();
         } else if (res.action === 'TOGGLE_SNAPPING') {
           dispatch({ type: 'TOGGLE_SNAPPING' });
         } else if (res.action === 'RESET_POSITION') {
