@@ -932,6 +932,8 @@ export const render = (state, dispatch) => {
       enableSnapping: enableSnapping !== false,
       canRerun,
       rerunTitle: 'Run Again',
+      x: Math.round(x),
+      y: Math.round(y),
     });
 
     const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/shell.widget/menu_helper';
@@ -951,6 +953,21 @@ export const render = (state, dispatch) => {
           dispatch({ type: 'TOGGLE_SNAPPING' });
         } else if (res.action === 'RESET_POSITION') {
           dispatch({ type: 'RESET_POSITION' });
+        } else if (res.action === 'RELOAD_WIDGET') {
+          const wid = res.widgetId || 'shell-widget-index-jsx';
+          run(`osascript -e 'tell application id "tracesOf.Uebersicht" to reload widget id "${wid}"' 2>/dev/null || osascript -e 'tell application id "tracesOf.Uebersicht" to refresh'`);
+        } else if (res.action === 'REMOVE_WIDGET') {
+          const wid = res.widgetId || 'shell-widget-index-jsx';
+          const dir = res.widgetDir || '';
+          const folder = res.widgetFolder || '';
+          const isDuplicate = /(-copy|\bcopy\b|-\d+)\.widget$/i.test(folder);
+          if (isDuplicate && dir) {
+            run(`osascript -e 'tell application "Finder" to delete POSIX file "${dir}"'`);
+          } else {
+            run(`osascript -e 'tell application id "tracesOf.Uebersicht" to set hidden of widget id "${wid}" to true'`);
+          }
+        } else if (res.action === 'DUPLICATE_WIDGET') {
+          run(`osascript -e 'tell application id "tracesOf.Uebersicht" to refresh'`);
         } else if (res.action === 'ORDER_FRONT' || res.action === 'ORDER_FORWARD' || res.action === 'ORDER_BACKWARD' || res.action === 'ORDER_BACK') {
           reorderWidget('shell', res.action);
           dispatch({ type: 'ORDER_CHANGED' });
