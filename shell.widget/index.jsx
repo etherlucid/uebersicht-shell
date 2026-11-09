@@ -1,5 +1,17 @@
 import { React, run } from 'uebersicht';
 import { theme as ITERM2_THEME, settings } from './lib/config.js';
+import {
+  getWidgetZIndex,
+  reorderWidget,
+  getScreenId,
+  resolveActiveScreen,
+  isScreenActive,
+  calculateSnappedPosition,
+  computeCrossScreenPreview,
+  resolveDragEndAcrossScreens,
+  broadcastWidgetMessage,
+  initWidgetDesktopSync,
+} from './lib/desktop.js';
 
 function formatShellCommand(cmd) {
   if (!cmd) return '';
@@ -21,8 +33,10 @@ export const refreshFrequency = settings.refreshFrequency !== undefined
 export const command = configuredCommand ? formatShellCommand(configuredCommand) : '';
 
 const POS_KEY = 'shell_widget_position';
+const STORAGE_INSTANCES_KEY = 'shell_widget_instances_v2';
 const SIZE_KEY = 'shell_widget_size';
 const STORAGE_SNAP_KEY = 'shell_widget_enable_snap';
+const STORAGE_ACTIVE_SCREEN_KEY = 'shell_active_screen';
 const SCREEN_MARGIN = 0;
 const SNAP_THRESHOLD = settings.snapThreshold !== undefined ? settings.snapThreshold : 6;
 const SNAP_EDGE_TOLERANCE = 3;
@@ -30,59 +44,12 @@ const SNAP_MARGIN_X = settings.snapMarginX !== undefined ? settings.snapMarginX 
 const SNAP_MARGIN_TOP = settings.snapMarginTop !== undefined ? settings.snapMarginTop : 14;
 const SNAP_MARGIN_BOTTOM = settings.snapMarginBottom !== undefined ? settings.snapMarginBottom : 14;
 
-const WIDGET_ORDER_KEY = 'uebersicht_widget_order';
-const DEFAULT_WIDGET_ORDER = ['sticker', 'cava', 'shell', 'nowplaying'];
-
-const getWidgetZIndex = (widgetId) => {
-  try {
-    const raw = localStorage.getItem(WIDGET_ORDER_KEY);
-    let order = raw ? JSON.parse(raw) : [...DEFAULT_WIDGET_ORDER];
-    if (!Array.isArray(order)) order = [...DEFAULT_WIDGET_ORDER];
-    let idx = order.indexOf(widgetId);
-    if (idx === -1) {
-      order.push(widgetId);
-      localStorage.setItem(WIDGET_ORDER_KEY, JSON.stringify(order));
-      idx = order.length - 1;
-    }
-    return 100 + idx * 50;
-  } catch (e) {
-    return 100;
-  }
-};
-
-const reorderWidget = (widgetId, action) => {
-  try {
-    const raw = localStorage.getItem(WIDGET_ORDER_KEY);
-    let order = raw ? JSON.parse(raw) : [...DEFAULT_WIDGET_ORDER];
-    if (!Array.isArray(order)) order = [...DEFAULT_WIDGET_ORDER];
-    if (!order.includes(widgetId)) {
-      order.push(widgetId);
-    }
-    const idx = order.indexOf(widgetId);
-    if (action === 'ORDER_FRONT' || action === 'BRING_TO_FRONT') {
-      order.splice(idx, 1);
-      order.push(widgetId);
-    } else if (action === 'ORDER_BACK' || action === 'SEND_TO_BACK') {
-      order.splice(idx, 1);
-      order.unshift(widgetId);
-    } else if (action === 'ORDER_FORWARD' || action === 'BRING_FORWARD') {
-      if (idx < order.length - 1) {
-        const temp = order[idx];
-        order[idx] = order[idx + 1];
-        order[idx + 1] = temp;
-      }
-    } else if (action === 'ORDER_BACKWARD' || action === 'SEND_BACKWARD') {
-      if (idx > 0) {
-        const temp = order[idx];
-        order[idx] = order[idx - 1];
-        order[idx - 1] = temp;
-      }
-    }
-    localStorage.setItem(WIDGET_ORDER_KEY, JSON.stringify(order));
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('uebersicht:order-changed', { detail: { order } }));
-    }
-  } catch (e) {}
+const SNAP_MARGINS = {
+  marginX: SNAP_MARGIN_X,
+  marginTop: SNAP_MARGIN_TOP,
+  marginBottom: SNAP_MARGIN_BOTTOM,
+  threshold: SNAP_THRESHOLD,
+  tolerance: SNAP_EDGE_TOLERANCE,
 };
 
 const getInitialSnapping = () => {
@@ -93,40 +60,6 @@ const getInitialSnapping = () => {
     }
   } catch (e) {}
   return settings.enableSnapping !== undefined ? settings.enableSnapping : true;
-};
-
-const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap = false, allowOverflow = true) => {
-  const winW = window.innerWidth || 1920;
-  const winH = window.innerHeight || 1080;
-
-  const maxX = Math.max(0, winW - cardWidth);
-  const maxY = Math.max(0, winH - cardHeight);
-
-  let newX = allowOverflow ? rawX : Math.max(0, Math.min(maxX, rawX));
-  let newY = Math.max(0, Math.min(maxY, rawY));
-
-  if (!bypassSnap && newX >= 0 && newX <= maxX) {
-    const snapTop = SNAP_MARGIN_TOP;
-    const snapBottom = Math.max(0, winH - cardHeight - SNAP_MARGIN_BOTTOM);
-    const snapLeft = SNAP_MARGIN_X;
-    const snapRight = Math.max(0, winW - cardWidth - SNAP_MARGIN_X);
-
-    // Horizontal snapping: release when moving closer to screen edge than guideline
-    if (newX >= snapLeft - SNAP_EDGE_TOLERANCE && newX <= snapLeft + SNAP_THRESHOLD) {
-      newX = snapLeft;
-    } else if (newX >= snapRight - SNAP_THRESHOLD && newX <= snapRight + SNAP_EDGE_TOLERANCE) {
-      newX = snapRight;
-    }
-
-    // Vertical snapping: release when moving closer to top/bottom edge than guideline
-    if (newY >= snapTop - SNAP_EDGE_TOLERANCE && newY <= snapTop + SNAP_THRESHOLD) {
-      newY = snapTop;
-    } else if (newY >= snapBottom - SNAP_THRESHOLD && newY <= snapBottom + SNAP_EDGE_TOLERANCE) {
-      newY = snapBottom;
-    }
-  }
-
-  return { x: newX, y: newY };
 };
 
 const FG_MAP = {
@@ -186,81 +119,26 @@ function get256Color(n) {
   return `rgb(${gray}, ${gray}, ${gray})`;
 }
 
-const STORAGE_ACTIVE_SCREEN_KEY = 'shell_active_screen';
-
-let syncChannel = null;
-try {
-  if (typeof BroadcastChannel !== 'undefined') {
-    syncChannel = new BroadcastChannel('uebersicht_multi_screen_sync');
-  }
-} catch (e) {}
-
-const getScreenId = () => {
-  try {
-    if (typeof window !== 'undefined' && window.location && window.location.pathname) {
-      const match = window.location.pathname.match(/\/(\d+)/);
-      if (match) return `screen_${match[1]}`;
-      const parts = window.location.pathname.split('/').filter(Boolean);
-      if (parts.length > 0 && !isNaN(Number(parts[0]))) {
-        return `screen_${parts[0]}`;
-      }
-    }
-  } catch (e) {}
-  try {
-    if (typeof window !== 'undefined' && window.screen) {
-      return `screen_${window.screen.width}x${window.screen.height}`;
-    }
-  } catch (e) {}
-  return 'screen_3';
-};
-
-const isMainScreen = (screenId) => {
-  if (screenId === 'screen_3' || screenId === 'screen_0') return true;
-  if (typeof window !== 'undefined') {
-    if (window.screen && window.screen.width === 2560) return true;
-    if (window.innerWidth === 2560) return true;
-  }
-  return false;
-};
-
-const isSecondaryScreen = (screenId) => {
-  if (screenId === 'screen_2' || screenId === 'screen_1') return true;
-  if (typeof window !== 'undefined') {
-    if (window.screen && (window.screen.width === 1080 || window.screen.height === 1920)) return true;
-    if (window.innerWidth === 1080 || window.innerHeight === 1920) return true;
-  }
-  return false;
-};
-
-const isScreenActive = (currentScreenId, activeScreen) => {
-  if (!activeScreen) return isMainScreen(currentScreenId);
-  if (activeScreen === currentScreenId) return true;
-  if (activeScreen === 'all') return true;
-
-  const isTargetMain = (activeScreen === 'screen_0' || activeScreen === 'screen_3' || activeScreen.includes('2560'));
-  if (isTargetMain && isMainScreen(currentScreenId)) return true;
-
-  const isTargetSecondary = (activeScreen === 'screen_1' || activeScreen === 'screen_2' || activeScreen.includes('1080x1920'));
-  if (isTargetSecondary && isSecondaryScreen(currentScreenId)) return true;
-
-  // Failsafe: if activeScreen matches neither monitor, ALWAYS show on main monitor so widget is NEVER permanently lost
-  if (!isTargetMain && !isTargetSecondary && isMainScreen(currentScreenId)) {
-    return true;
-  }
-
-  return false;
-};
-
 const getActiveScreen = () => {
   try {
     const saved = localStorage.getItem(STORAGE_ACTIVE_SCREEN_KEY);
-    if (saved) return saved;
+    if (saved) return resolveActiveScreen(saved);
   } catch (e) {}
-  return 'screen_3';
+  return resolveActiveScreen(null);
 };
 
 const getInitialInstances = () => {
   const screenId = getScreenId();
+  try {
+    const savedCanonical = localStorage.getItem(STORAGE_INSTANCES_KEY);
+    if (savedCanonical) {
+      const parsed = JSON.parse(savedCanonical);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (e) {}
+
   try {
     const saved = localStorage.getItem(`${POS_KEY}_instances_${screenId}`);
     if (saved) {
@@ -275,26 +153,8 @@ const getInitialInstances = () => {
   const defaultH = configuredCommand ? 300 : 220;
 
   try {
-    const saved = localStorage.getItem(`${POS_KEY}_${screenId}`);
+    const saved = localStorage.getItem(`${POS_KEY}_${screenId}`) || localStorage.getItem(POS_KEY);
     const savedSize = localStorage.getItem(`${SIZE_KEY}_${screenId}`) || localStorage.getItem(SIZE_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      const parsedSize = savedSize ? JSON.parse(savedSize) : null;
-      if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
-        return [{
-          id: 'default',
-          x: Math.max(SCREEN_MARGIN, parsed.x),
-          y: Math.max(SCREEN_MARGIN, parsed.y),
-          w: parsedSize?.w || defaultW,
-          h: parsedSize?.h || defaultH,
-        }];
-      }
-    }
-  } catch (e) {}
-
-  try {
-    const saved = localStorage.getItem(POS_KEY);
-    const savedSize = localStorage.getItem(SIZE_KEY);
     if (saved) {
       const parsed = JSON.parse(saved);
       const parsedSize = savedSize ? JSON.parse(savedSize) : null;
@@ -319,13 +179,18 @@ const getInitialInstances = () => {
   }];
 };
 
-const saveInstances = (instances) => {
-  const screenId = getScreenId();
+const saveInstances = (instances, targetScreenId) => {
+  const screenId = targetScreenId || getScreenId();
   try {
+    localStorage.setItem(STORAGE_INSTANCES_KEY, JSON.stringify(instances));
     localStorage.setItem(`${POS_KEY}_instances_${screenId}`, JSON.stringify(instances));
     if (instances && instances[0]) {
-      localStorage.setItem(`${POS_KEY}_${screenId}`, JSON.stringify({ x: instances[0].x, y: instances[0].y }));
-      localStorage.setItem(`${SIZE_KEY}_${screenId}`, JSON.stringify({ w: instances[0].w, h: instances[0].h }));
+      const posJson = JSON.stringify({ x: instances[0].x, y: instances[0].y });
+      const sizeJson = JSON.stringify({ w: instances[0].w, h: instances[0].h });
+      localStorage.setItem(`${POS_KEY}_${screenId}`, posJson);
+      localStorage.setItem(POS_KEY, posJson);
+      localStorage.setItem(`${SIZE_KEY}_${screenId}`, sizeJson);
+      localStorage.setItem(SIZE_KEY, sizeJson);
     }
   } catch (e) {}
 };
@@ -348,6 +213,10 @@ export const initialState = {
   dragStartY: 0,
   startPosX: 0,
   startPosY: 0,
+  lastClientX: 0,
+  lastClientY: 0,
+  lastBypassSnap: false,
+  crossScreenPreview: null,
   resizeStartX: 0,
   resizeStartY: 0,
   startW: 0,
@@ -434,7 +303,7 @@ export const updateState = (event, previousState) => {
     };
   }
 
-  if (event.type === 'CLEAR_LINES') {
+  if (event.type === 'CLEAR_LINES' || event.type === 'CLEAR_OUTPUT') {
     return {
       ...previousState,
       lines: [],
@@ -465,6 +334,8 @@ export const updateState = (event, previousState) => {
       draggingInstanceId: event.instanceId,
       dragStartX: event.clientX,
       dragStartY: event.clientY,
+      lastClientX: event.clientX,
+      lastClientY: event.clientY,
       startPosX: event.startPosX !== undefined ? event.startPosX : previousState.x,
       startPosY: event.startPosY !== undefined ? event.startPosY : previousState.y,
       startW: event.w || previousState.w || 420,
@@ -484,7 +355,9 @@ export const updateState = (event, previousState) => {
       previousState.startPosY + deltaY,
       cardW,
       cardH,
-      bypassSnap
+      bypassSnap,
+      true,
+      SNAP_MARGINS
     );
 
     const updatedInstances = (previousState.instances || []).map((inst) => {
@@ -494,13 +367,28 @@ export const updateState = (event, previousState) => {
       return inst;
     });
 
-    saveInstances(updatedInstances);
+    const currentScreenId = getScreenId();
+    const preview = computeCrossScreenPreview({
+      currentScreenId,
+      curX: newX,
+      curY: newY,
+      cardW,
+      cardH,
+    });
+
+    broadcastWidgetMessage('shell', {
+      type: 'CROSS_SCREEN_DRAG_PREVIEW',
+      preview,
+    });
 
     return {
       ...previousState,
       instances: updatedInstances,
       x: updatedInstances[0]?.x ?? newX,
       y: updatedInstances[0]?.y ?? newY,
+      lastClientX: event.clientX,
+      lastClientY: event.clientY,
+      lastBypassSnap: bypassSnap,
     };
   }
 
@@ -513,26 +401,23 @@ export const updateState = (event, previousState) => {
     const cardH = previousState.startH || previousState.h || defaultH;
     const curX = currentInst?.x ?? previousState.x ?? 0;
     const curY = currentInst?.y ?? previousState.y ?? 0;
-
-    const winW = typeof window !== 'undefined' ? (window.innerWidth || 1920) : 1920;
-    const winH = typeof window !== 'undefined' ? (window.innerHeight || 1080) : 1080;
     const currentScreenId = getScreenId();
-    const isMain = isMainScreen(currentScreenId);
 
-    let targetScreen = previousState.activeScreen || currentScreenId;
-    let finalX = curX;
-    let finalY = Math.max(14, Math.min(winH - cardH - 14, curY));
+    const resolution = resolveDragEndAcrossScreens({
+      currentScreenId,
+      curX,
+      curY,
+      cardW,
+      cardH,
+      clientX: event.clientX ?? previousState.lastClientX,
+      clientY: event.clientY ?? previousState.lastClientY,
+      bypassSnap: previousState.lastBypassSnap,
+      margins: SNAP_MARGINS,
+    });
 
-    // Monitor arrangement: Main (LG WFHD, left, 2560x1080, screen_3) <-> Secondary (ASUS PB287Q, right, 1080x1920, screen_2)
-    if (isMain && curX + (cardW / 3) > winW) {
-      targetScreen = 'screen_2';
-      finalX = 14;
-    } else if (!isMain && curX < -(cardW / 3)) {
-      targetScreen = 'screen_3';
-      finalX = Math.max(14, 2560 - cardW - 14);
-    } else {
-      finalX = Math.max(0, Math.min(winW - cardW, curX));
-    }
+    const targetScreen = resolution.targetScreen || currentScreenId;
+    const finalX = resolution.x;
+    const finalY = resolution.y;
 
     try {
       localStorage.setItem(STORAGE_ACTIVE_SCREEN_KEY, targetScreen);
@@ -545,22 +430,26 @@ export const updateState = (event, previousState) => {
       return inst;
     });
 
-    saveInstances(updatedInstances);
+    saveInstances(updatedInstances, targetScreen);
 
-    if (syncChannel) {
-      syncChannel.postMessage({
-        widget: 'shell',
-        type: 'ACTIVE_SCREEN_CHANGED',
-        activeScreen: targetScreen,
-        x: finalX,
-        y: finalY,
-      });
-    }
+    broadcastWidgetMessage('shell', {
+      type: 'CROSS_SCREEN_DRAG_PREVIEW',
+      preview: null,
+    });
+
+    broadcastWidgetMessage('shell', {
+      type: 'ACTIVE_SCREEN_CHANGED',
+      activeScreen: targetScreen,
+      instances: updatedInstances,
+      x: finalX,
+      y: finalY,
+    });
 
     return {
       ...previousState,
       isDragging: false,
       draggingInstanceId: null,
+      crossScreenPreview: null,
       activeScreen: targetScreen,
       instances: updatedInstances,
       x: finalX,
@@ -569,7 +458,7 @@ export const updateState = (event, previousState) => {
   }
 
   if (event.type === 'MOVE_TO_SCREEN') {
-    const targetScreen = event.screenId || 'screen_1';
+    const targetScreen = resolveActiveScreen(event.screenId || getScreenId());
     try {
       localStorage.setItem(STORAGE_ACTIVE_SCREEN_KEY, targetScreen);
     } catch (e) {}
@@ -584,20 +473,19 @@ export const updateState = (event, previousState) => {
       x: finalX,
       y: finalY,
     }));
-    saveInstances(updatedInstances);
+    saveInstances(updatedInstances, targetScreen);
 
-    if (syncChannel) {
-      syncChannel.postMessage({
-        widget: 'shell',
-        type: 'ACTIVE_SCREEN_CHANGED',
-        activeScreen: targetScreen,
-        x: finalX,
-        y: finalY,
-      });
-    }
+    broadcastWidgetMessage('shell', {
+      type: 'ACTIVE_SCREEN_CHANGED',
+      activeScreen: targetScreen,
+      instances: updatedInstances,
+      x: finalX,
+      y: finalY,
+    });
 
     return {
       ...previousState,
+      crossScreenPreview: null,
       activeScreen: targetScreen,
       instances: updatedInstances,
       x: finalX,
@@ -607,7 +495,9 @@ export const updateState = (event, previousState) => {
 
   if (event.type === 'SYNC_ACTIVE_SCREEN') {
     let updatedInstances = previousState.instances;
-    if (typeof event.x === 'number' && typeof event.y === 'number') {
+    if (Array.isArray(event.instances) && event.instances.length > 0) {
+      updatedInstances = event.instances;
+    } else if (typeof event.x === 'number' && typeof event.y === 'number') {
       updatedInstances = (previousState.instances || []).map((inst) => ({
         ...inst,
         x: event.x,
@@ -616,10 +506,31 @@ export const updateState = (event, previousState) => {
     }
     return {
       ...previousState,
-      activeScreen: event.activeScreen,
+      crossScreenPreview: null,
+      activeScreen: resolveActiveScreen(event.activeScreen),
       instances: updatedInstances,
-      x: event.x !== undefined ? event.x : previousState.x,
-      y: event.y !== undefined ? event.y : previousState.y,
+      x: event.x !== undefined ? event.x : (updatedInstances[0]?.x ?? previousState.x),
+      y: event.y !== undefined ? event.y : (updatedInstances[0]?.y ?? previousState.y),
+    };
+  }
+
+  if (event.type === 'CROSS_SCREEN_DRAG_PREVIEW') {
+    return {
+      ...previousState,
+      crossScreenPreview: event.preview || null,
+    };
+  }
+
+  if (event.type === 'TOPOLOGY_UPDATED') {
+    const resolved = resolveActiveScreen(previousState.activeScreen, event.topology);
+    if (resolved !== previousState.activeScreen) {
+      try {
+        localStorage.setItem(STORAGE_ACTIVE_SCREEN_KEY, resolved);
+      } catch (e) {}
+    }
+    return {
+      ...previousState,
+      activeScreen: resolved,
     };
   }
 
@@ -649,8 +560,8 @@ export const updateState = (event, previousState) => {
     const maxW = Math.max(220, winW - currentX);
     const maxH = Math.max(120, winH - currentY);
 
-    let newW = Math.max(220, Math.min(maxW, previousState.startW + deltaW));
-    let newH = Math.max(120, Math.min(maxH, previousState.startH + deltaH));
+    let newW = Math.round(Math.max(220, Math.min(maxW, previousState.startW + deltaW)));
+    let newH = Math.round(Math.max(120, Math.min(maxH, previousState.startH + deltaH)));
 
     if (previousState.enableSnapping !== false && !event.bypassSnap && !event.metaKey) {
       const snapW = winW - currentX - SNAP_MARGIN_X;
@@ -670,8 +581,6 @@ export const updateState = (event, previousState) => {
       return inst;
     });
 
-    saveInstances(updatedInstances);
-
     return {
       ...previousState,
       instances: updatedInstances,
@@ -681,17 +590,11 @@ export const updateState = (event, previousState) => {
   }
 
   if (event.type === 'END_RESIZE') {
+    saveInstances(previousState.instances, previousState.activeScreen);
     return {
       ...previousState,
       isResizing: false,
       resizingInstanceId: null,
-    };
-  }
-
-  if (event.type === 'CLEAR_OUTPUT') {
-    return {
-      ...previousState,
-      lines: [],
     };
   }
 
@@ -718,7 +621,7 @@ export const updateState = (event, previousState) => {
       }
       return i;
     });
-    saveInstances(updatedInstances);
+    saveInstances(updatedInstances, previousState.activeScreen);
     return {
       ...previousState,
       instances: updatedInstances,
@@ -733,7 +636,7 @@ export const updateState = (event, previousState) => {
     const current = previousState.instances && previousState.instances.length > 0
       ? previousState.instances
       : [{ id: 'default', x: previousState.x || SNAP_MARGIN_X, y: previousState.y || SNAP_MARGIN_TOP, w: previousState.w || defaultW, h: previousState.h || defaultH }];
-    const target = current.find(i => i.id === event.instanceId) || current[current.length - 1];
+    const target = current.find((i) => i.id === event.instanceId) || current[current.length - 1];
     const newInst = {
       ...target,
       id: `inst_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
@@ -741,7 +644,7 @@ export const updateState = (event, previousState) => {
       y: (target.y || SNAP_MARGIN_TOP) + 30,
     };
     const updatedInstances = [...current, newInst];
-    saveInstances(updatedInstances);
+    saveInstances(updatedInstances, previousState.activeScreen);
     return {
       ...previousState,
       instances: updatedInstances,
@@ -751,8 +654,8 @@ export const updateState = (event, previousState) => {
   if (event.type === 'REMOVE_WIDGET') {
     const current = previousState.instances || [];
     if (current.length > 1) {
-      const updatedInstances = current.filter(i => i.id !== event.instanceId);
-      saveInstances(updatedInstances);
+      const updatedInstances = current.filter((i) => i.id !== event.instanceId);
+      saveInstances(updatedInstances, previousState.activeScreen);
       return {
         ...previousState,
         instances: updatedInstances,
@@ -881,67 +784,64 @@ function renderAnsiText(raw) {
 }
 
 let currentDispatch = null;
-if (typeof window !== 'undefined' && !window.__uebersicht_order_listener_shell) {
-  window.__uebersicht_order_listener_shell = true;
-  window.addEventListener('uebersicht:order-changed', () => {
-    if (currentDispatch) {
-      currentDispatch({ type: 'ORDER_CHANGED' });
-    }
-  });
-}
 
-if (typeof window !== 'undefined' && !window.__uebersicht_shell_sync_listener) {
-  window.__uebersicht_shell_sync_listener = true;
-
-  if (syncChannel) {
-    syncChannel.addEventListener('message', (event) => {
-      const data = event.data;
-      if (data && data.widget === 'shell' && currentDispatch) {
-        currentDispatch({
-          type: 'SYNC_ACTIVE_SCREEN',
-          activeScreen: data.activeScreen,
-          x: data.x,
-          y: data.y,
-        });
-      }
-    });
-  }
-
-  window.addEventListener('storage', (event) => {
-    if (event.key === STORAGE_ACTIVE_SCREEN_KEY && event.newValue && currentDispatch) {
-      currentDispatch({
+initWidgetDesktopSync({
+  widgetName: 'shell',
+  helperCommand: `"$HOME/Library/Application Support/Übersicht/widgets/shell.widget/menu_helper" --screens 2>/dev/null || "./shell.widget/menu_helper" --screens 2>/dev/null`,
+  run,
+  getDispatch: () => currentDispatch,
+  onSyncPacket: (data, dispatch) => {
+    if (data.type === 'ACTIVE_SCREEN_CHANGED') {
+      dispatch({
         type: 'SYNC_ACTIVE_SCREEN',
-        activeScreen: event.newValue,
+        activeScreen: data.activeScreen,
+        instances: data.instances,
+        x: data.x,
+        y: data.y,
+      });
+    } else if (data.type === 'CROSS_SCREEN_DRAG_PREVIEW') {
+      dispatch({
+        type: 'CROSS_SCREEN_DRAG_PREVIEW',
+        preview: data.preview,
       });
     }
-  });
-
-  const checkScreens = () => {
-    const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/shell.widget/menu_helper';
-    const fallbackPath = './shell.widget/menu_helper';
-    run(`"${helperPath}" --screens 2>/dev/null || "${fallbackPath}" --screens 2>/dev/null`, (err, out) => {
-      if (err || !out) return;
-      try {
-        const screens = JSON.parse(out.trim());
-        if (Array.isArray(screens) && screens.length === 1 && currentDispatch) {
-          currentDispatch({ type: 'MOVE_TO_SCREEN', screenId: 'screen_0' });
-        }
-      } catch (e) {}
-    });
-  };
-
-  window.addEventListener('resize', checkScreens);
-  setTimeout(checkScreens, 1500);
-}
+  },
+});
 
 export const render = (state, dispatch) => {
   currentDispatch = dispatch;
   const currentScreenId = getScreenId();
   const activeScreen = state?.activeScreen || getActiveScreen();
+  const isCurrentActive = isScreenActive(currentScreenId, activeScreen);
+  const preview = state?.crossScreenPreview;
 
-  if (!isScreenActive(currentScreenId, activeScreen)) {
+  if (!isCurrentActive && (!preview || preview.targetScreen !== currentScreenId)) {
     return <div style={{ display: 'none' }} />;
   }
+
+  if (!isCurrentActive && preview && preview.targetScreen === currentScreenId) {
+    return (
+      <div
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          transform: `translate3d(${preview.x}px, ${preview.y}px, 0)`,
+          width: `${preview.w}px`,
+          height: `${preview.h}px`,
+          borderRadius: '16px',
+          backgroundColor: ITERM2_THEME.bg,
+          backdropFilter: 'blur(24px) saturate(180%)',
+          WebkitBackdropFilter: 'blur(24px) saturate(180%)',
+          border: '1.5px solid rgba(255, 255, 255, 0.28)',
+          boxShadow: '0 16px 40px rgba(0, 0, 0, 0.55)',
+          zIndex: 9999,
+          pointerEvents: 'none',
+        }}
+      />
+    );
+  }
+
   const {
     enableSnapping = true,
     lines = [],
@@ -995,10 +895,8 @@ export const render = (state, dispatch) => {
       return;
     }
 
-    // 1. Immediately record command and transition to running state
     dispatch({ type: 'COMMAND_START', cmd });
 
-    // 2. Continuous / interactive guardrails
     if (cmd === 'cava' || cmd.startsWith('cava ')) {
       dispatch({
         type: 'COMMAND_OUTPUT',
@@ -1029,7 +927,6 @@ export const render = (state, dispatch) => {
       return;
     }
 
-    // 3. Auto-snapshot & bound infinite tools
     let execCmd = cmd;
     if (cmd === 'top') {
       execCmd = 'top -l 1';
@@ -1136,7 +1033,20 @@ export const render = (state, dispatch) => {
             selEvent.preventDefault();
           };
 
-          // Alt/Option key bypass OR explicit drag handle: drag immediately
+          let rafId = null;
+          let latestMove = null;
+
+          const flushMove = () => {
+            rafId = null;
+            if (!latestMove) return;
+            dispatch({
+              type: 'MOVE_DRAG',
+              clientX: latestMove.clientX,
+              clientY: latestMove.clientY,
+              bypassSnap: latestMove.bypassSnap,
+            });
+          };
+
           if (e.altKey || isDragHandle) {
             e.preventDefault();
             try {
@@ -1163,15 +1073,21 @@ export const render = (state, dispatch) => {
 
             const onMouseMove = (moveEvent) => {
               moveEvent.preventDefault();
-              dispatch({
-                type: 'MOVE_DRAG',
+              latestMove = {
                 clientX: moveEvent.clientX,
                 clientY: moveEvent.clientY,
                 bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
-              });
+              };
+              if (!rafId) {
+                rafId = window.requestAnimationFrame(flushMove);
+              }
             };
 
-            const onMouseUp = () => {
+            const onMouseUp = (upEvent) => {
+              if (rafId) {
+                window.cancelAnimationFrame(rafId);
+                rafId = null;
+              }
               window.removeEventListener('selectstart', preventSelect, true);
               try {
                 document.body.style.userSelect = '';
@@ -1181,7 +1097,11 @@ export const render = (state, dispatch) => {
                   window.getSelection().removeAllRanges();
                 }
               } catch (err) {}
-              dispatch({ type: 'END_DRAG' });
+              dispatch({
+                type: 'END_DRAG',
+                clientX: upEvent.clientX,
+                clientY: upEvent.clientY,
+              });
               window.removeEventListener('mousemove', onMouseMove);
               window.removeEventListener('mouseup', onMouseUp);
             };
@@ -1191,9 +1111,6 @@ export const render = (state, dispatch) => {
             return;
           }
 
-          // Default behavior is standard text selection.
-          // On a long-press (held for ~320ms without moving > 4px),
-          // widget engages drag mode, clears any selection, and suppresses text selection.
           let dragStarted = false;
           let holdTimer = setTimeout(() => {
             dragStarted = true;
@@ -1224,15 +1141,12 @@ export const render = (state, dispatch) => {
             const dist = Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY);
             if (!dragStarted) {
               if (dist > 4) {
-                // Moved before long-press threshold: user is dragging to select text!
                 if (holdTimer) {
                   clearTimeout(holdTimer);
                   holdTimer = null;
                 }
-                // Normal native text selection continues freely
               }
             } else {
-              // Drag mode active: suppress text selection completely!
               moveEvent.preventDefault();
               moveEvent.stopPropagation();
               try {
@@ -1240,19 +1154,25 @@ export const render = (state, dispatch) => {
                   window.getSelection().removeAllRanges();
                 }
               } catch (err) {}
-              dispatch({
-                type: 'MOVE_DRAG',
+              latestMove = {
                 clientX: moveEvent.clientX,
                 clientY: moveEvent.clientY,
                 bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
-              });
+              };
+              if (!rafId) {
+                rafId = window.requestAnimationFrame(flushMove);
+              }
             }
           };
 
-          const onMouseUp = () => {
+          const onMouseUp = (upEvent) => {
             if (holdTimer) {
               clearTimeout(holdTimer);
               holdTimer = null;
+            }
+            if (rafId) {
+              window.cancelAnimationFrame(rafId);
+              rafId = null;
             }
             if (dragStarted) {
               window.removeEventListener('selectstart', preventSelect, true);
@@ -1260,13 +1180,15 @@ export const render = (state, dispatch) => {
                 document.body.style.userSelect = '';
                 document.body.style.webkitUserSelect = '';
                 document.body.style.cursor = '';
-              } catch (err) {}
-              try {
                 if (window.getSelection) {
                   window.getSelection().removeAllRanges();
                 }
               } catch (err) {}
-              dispatch({ type: 'END_DRAG' });
+              dispatch({
+                type: 'END_DRAG',
+                clientX: upEvent.clientX,
+                clientY: upEvent.clientY,
+              });
             }
             window.removeEventListener('mousemove', onMouseMove);
             window.removeEventListener('mouseup', onMouseUp);
@@ -1292,16 +1214,36 @@ export const render = (state, dispatch) => {
             startPosY: y,
           });
 
-          const onMouseMove = (moveEvent) => {
+          let rafId = null;
+          let latestResize = null;
+
+          const flushResize = () => {
+            rafId = null;
+            if (!latestResize) return;
             dispatch({
               type: 'MOVE_RESIZE',
-              clientX: moveEvent.clientX,
-              clientY: moveEvent.clientY,
-              bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
+              clientX: latestResize.clientX,
+              clientY: latestResize.clientY,
+              bypassSnap: latestResize.bypassSnap,
             });
           };
 
+          const onMouseMove = (moveEvent) => {
+            latestResize = {
+              clientX: moveEvent.clientX,
+              clientY: moveEvent.clientY,
+              bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
+            };
+            if (!rafId) {
+              rafId = window.requestAnimationFrame(flushResize);
+            }
+          };
+
           const onMouseUp = () => {
+            if (rafId) {
+              window.cancelAnimationFrame(rafId);
+              rafId = null;
+            }
             dispatch({ type: 'END_RESIZE' });
             window.removeEventListener('mousemove', onMouseMove);
             window.removeEventListener('mouseup', onMouseUp);
@@ -1361,9 +1303,11 @@ export const render = (state, dispatch) => {
         };
 
         const positionStyle = {
-          position: 'absolute',
-          top: `${y}px`,
-          left: `${x}px`,
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          transform: `translate3d(${x}px, ${y}px, 0)`,
+          willChange: isDragging || isResizing ? 'transform, width, height' : 'auto',
           width: `${w}px`,
           height: `${h}px`,
           zIndex: isDragging ? 9999 : getWidgetZIndex('shell'),
@@ -1394,7 +1338,6 @@ export const render = (state, dispatch) => {
               style={windowStyle}
               onDoubleClick={isSingleCommandMode ? handleRefresh : undefined}
             >
-              {/* Optional Title Bar (matching cava.widget, hidden when showTitleBar is false) */}
               {settings.showTitleBar && (
                 <div style={titleBarStyle} data-drag-handle="true">
                   <div style={trafficLightsStyle}>
@@ -1415,9 +1358,7 @@ export const render = (state, dispatch) => {
                 </div>
               )}
 
-              {/* Force clean translucent scrollbars on WebKit without browser white borders */}
               <style dangerouslySetInnerHTML={{ __html: `
-                /* When dragging: immediately freeze all text selection and set grabbing cursor */
                 .shell-dragging,
                 .shell-dragging * {
                   user-select: none !important;
@@ -1484,7 +1425,6 @@ export const render = (state, dispatch) => {
                 }
               ` }} />
 
-              {/* Terminal Body */}
               <div
                 className="shell-terminal-scroll"
                 ref={(el) => {
@@ -1522,7 +1462,6 @@ export const render = (state, dispatch) => {
                   );
                 })}
 
-                {/* Loading Indicator for Single Command Mode */}
                 {isSingleCommandMode && lines.length === 0 && (
                   <div style={runningRowStyle}>
                     <span style={runningDotStyle} />
@@ -1530,7 +1469,6 @@ export const render = (state, dispatch) => {
                   </div>
                 )}
 
-                {/* Active Running State or Interactive Prompt */}
                 {showPrompt && (
                   isRunning ? (
                     <div style={runningRowStyle}>
@@ -1567,7 +1505,6 @@ export const render = (state, dispatch) => {
                 )}
               </div>
 
-              {/* Resize Handle */}
               <div
                 data-no-drag="true"
                 style={resizeHandleStyle}
@@ -1596,100 +1533,57 @@ export const className = `
   -webkit-user-select: text;
   cursor: default;
 
-  /* Standard mouse pointer across terminal content, no caret cursor */
   &, & * {
     cursor: default;
   }
 
+  input {
+    user-select: text;
+    -webkit-user-select: text;
+    cursor: text !important;
+  }
+
   ::selection {
-    background: rgba(251, 184, 41, 0.35);
-    color: inherit;
-  }
-  *::selection {
-    background: rgba(251, 184, 41, 0.35);
-    color: inherit;
+    background: ${ITERM2_THEME.selectionBg};
+    color: ${ITERM2_THEME.selectionFg};
   }
 
-  /* Specific interactive controls override text cursor */
-  input,
-  [data-no-drag="true"] {
-    cursor: auto;
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
   }
-
-  [data-no-drag="true"][title="Clear terminal"],
-  [data-no-drag="true"][title*="cancel"] {
-    cursor: pointer !important;
-  }
-
-  [title="Drag to resize"] {
-    cursor: se-resize !important;
-  }
-
-  .shell-dragging,
-  .shell-dragging * {
-    user-select: none !important;
-    -webkit-user-select: none !important;
-    cursor: grabbing !important;
-  }
-
-  @keyframes shellPulse {
-    0%, 100% { opacity: 0.3; transform: scale(0.85); }
-    50% { opacity: 1; transform: scale(1.15); }
-  }
-
-  input::placeholder {
-    color: rgba(252, 232, 195, 0.35);
-  }
-
-  /* Thin, barely-visible scrollbars with zero background fill */
-  & *::-webkit-scrollbar,
-  *::-webkit-scrollbar,
-  ::-webkit-scrollbar {
-    width: 4px !important;
-    height: 4px !important;
+  *::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
     background: transparent !important;
-    background-color: rgba(0, 0, 0, 0) !important;
   }
-  & *::-webkit-scrollbar-track,
-  *::-webkit-scrollbar-track,
-  ::-webkit-scrollbar-track,
-  & *::-webkit-scrollbar-track-piece,
-  *::-webkit-scrollbar-track-piece,
-  ::-webkit-scrollbar-track-piece {
+  *::-webkit-scrollbar-track {
     background: transparent !important;
-    background-color: rgba(0, 0, 0, 0) !important;
     border: none !important;
     box-shadow: none !important;
   }
-  & *::-webkit-scrollbar-corner,
-  *::-webkit-scrollbar-corner,
-  ::-webkit-scrollbar-corner,
-  & *::-webkit-resizer,
-  *::-webkit-resizer,
-  ::-webkit-resizer {
+  *::-webkit-scrollbar-track-piece {
     background: transparent !important;
-    background-color: rgba(0, 0, 0, 0) !important;
+    border: none !important;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: rgba(255, 255, 255, 0.16) !important;
+    border-radius: 999px !important;
     border: none !important;
     box-shadow: none !important;
   }
-  & *::-webkit-scrollbar-thumb,
-  *::-webkit-scrollbar-thumb,
-  ::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.18) !important;
-    background-color: rgba(255, 255, 255, 0.18) !important;
-    border-radius: 4px !important;
-    border: none !important;
-    box-shadow: none !important;
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(255, 255, 255, 0.30) !important;
   }
-  & *::-webkit-scrollbar-thumb:hover,
-  *::-webkit-scrollbar-thumb:hover,
-  ::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.35) !important;
-    background-color: rgba(255, 255, 255, 0.35) !important;
+  *::-webkit-scrollbar-corner {
+    background: transparent !important;
+    display: none !important;
   }
-  & *::-webkit-scrollbar-button,
-  *::-webkit-scrollbar-button,
-  ::-webkit-scrollbar-button {
+  *::-webkit-resizer {
+    background: transparent !important;
+    display: none !important;
+  }
+  *::-webkit-scrollbar-button {
     display: none !important;
     width: 0 !important;
     height: 0 !important;
@@ -1697,7 +1591,6 @@ export const className = `
 `;
 
 const windowStyle = {
-  colorScheme: 'dark',
   position: 'relative',
   width: '100%',
   height: '100%',
@@ -1711,7 +1604,6 @@ const windowStyle = {
   overflow: 'hidden',
   display: 'flex',
   flexDirection: 'column',
-  cursor: 'default',
 };
 
 const titleBarStyle = {
@@ -1722,9 +1614,9 @@ const titleBarStyle = {
   borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
   backgroundColor: 'rgba(0, 0, 0, 0.15)',
   cursor: 'grab',
+  flexShrink: 0,
   userSelect: 'none',
   WebkitUserSelect: 'none',
-  flexShrink: 0,
 };
 
 const trafficLightsStyle = {
@@ -1745,55 +1637,53 @@ const dotStyle = {
 const titleTextStyle = {
   fontSize: '11px',
   fontWeight: '600',
-  color: 'rgba(252, 232, 195, 0.65)',
+  color: 'rgba(252, 232, 195, 0.70)',
   letterSpacing: '0.2px',
 };
 
 const terminalBodyStyle = {
-  colorScheme: 'dark',
   flex: 1,
-  padding: settings.showTitleBar ? '10px 14px' : '14px 16px',
+  padding: '12px 14px',
   overflowY: 'auto',
   overflowX: 'auto',
-  fontFamily: '"SF Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace',
-  fontSize: settings.fontSize || '11px',
-  lineHeight: settings.lineHeight || '1.35',
-  cursor: 'default',
-  userSelect: 'text',
-  WebkitUserSelect: 'text',
+  fontFamily: settings.fontFamily || '"SF Mono", "JetBrains Mono", "Fira Code", Menlo, Monaco, Consolas, monospace',
+  fontSize: `${settings.fontSize || 12}px`,
+  lineHeight: settings.lineHeight || '1.45',
+  color: ITERM2_THEME.fg,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '4px',
   boxSizing: 'border-box',
+  backgroundColor: 'transparent',
 };
 
 const lineStyle = {
-  marginBottom: '2px',
-  whiteSpace: 'pre',
-  cursor: 'default',
-  userSelect: 'text',
-  WebkitUserSelect: 'text',
+  wordBreak: 'break-word',
+  whiteSpace: 'pre-wrap',
 };
 
 const preStyle = {
   margin: 0,
   fontFamily: 'inherit',
   fontSize: 'inherit',
-  whiteSpace: 'pre',
-  wordBreak: 'normal',
-  cursor: 'default',
-  userSelect: 'text',
-  WebkitUserSelect: 'text',
+  lineHeight: 'inherit',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+  color: ITERM2_THEME.fg,
 };
 
 const promptRowStyle = {
   display: 'flex',
   alignItems: 'center',
   gap: '6px',
-  marginTop: '6px',
+  marginTop: '2px',
 };
 
 const promptSymbolStyle = {
-  color: ITERM2_THEME.yellow,
+  color: ITERM2_THEME.green,
   fontWeight: '700',
-  fontSize: '12px',
+  userSelect: 'none',
+  WebkitUserSelect: 'none',
 };
 
 const inputStyle = {
@@ -1801,17 +1691,20 @@ const inputStyle = {
   background: 'transparent',
   border: 'none',
   outline: 'none',
+  color: ITERM2_THEME.brightWhite,
+  caretColor: ITERM2_THEME.cursor,
   fontFamily: 'inherit',
-  fontSize: '12px',
-  color: ITERM2_THEME.fg,
+  fontSize: 'inherit',
   padding: 0,
+  margin: 0,
 };
 
 const runningRowStyle = {
   display: 'flex',
   alignItems: 'center',
   gap: '8px',
-  marginTop: '6px',
+  marginTop: '2px',
+  padding: '2px 0',
 };
 
 const runningDotStyle = {
@@ -1819,24 +1712,29 @@ const runningDotStyle = {
   height: '7px',
   borderRadius: '50%',
   backgroundColor: ITERM2_THEME.yellow,
+  boxShadow: `0 0 8px ${ITERM2_THEME.yellow}`,
   display: 'inline-block',
-  animation: 'shellPulse 1.2s infinite ease-in-out',
 };
 
 const runningTextStyle = {
-  fontStyle: 'italic',
-  color: 'rgba(252, 232, 195, 0.65)',
+  color: ITERM2_THEME.yellow,
   fontSize: '11px',
+  fontStyle: 'italic',
+  opacity: 0.9,
+  userSelect: 'none',
+  WebkitUserSelect: 'none',
 };
 
 const abortButtonStyle = {
-  cursor: 'pointer',
-  padding: '1px 6px',
-  borderRadius: '4px',
-  backgroundColor: 'rgba(255, 255, 255, 0.08)',
-  color: ITERM2_THEME.fg,
+  marginLeft: 'auto',
   fontSize: '10px',
-  opacity: 0.75,
+  color: ITERM2_THEME.red,
+  backgroundColor: 'rgba(247, 83, 65, 0.14)',
+  border: '1px solid rgba(247, 83, 65, 0.35)',
+  borderRadius: '6px',
+  padding: '1px 7px',
+  cursor: 'pointer',
+  fontWeight: '600',
   userSelect: 'none',
   WebkitUserSelect: 'none',
 };
@@ -1852,4 +1750,6 @@ const resizeHandleStyle = {
   justifyContent: 'center',
   cursor: 'se-resize',
   zIndex: 10,
+  userSelect: 'none',
+  WebkitUserSelect: 'none',
 };
